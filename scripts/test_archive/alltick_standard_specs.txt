@@ -1,0 +1,155 @@
+========== ALLTICK METADATA & SPECIFICATIONS ==========
+
+IMPORTANT: AllTick $199 plan depth-tick endpoint returns ONLY:
+  ✓ code (symbol)
+  ✓ bids/asks (with prices and volumes)
+  ✓ tick_time (timestamp)
+  ✓ seq (sequence number)
+  
+  ✗ NOT included: lot size, tick size, pip value, multiplier
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣  CRYPTO (SPOT - Binance/AllTick format)
+   Symbol Format: BTCUSDT, ETHUSDT, AVAXUSDT
+   
+   Standard Specifications (Binance):
+   ┌─────────────────────────┬──────────────────┐
+   │ Property                │ Value            │
+   ├─────────────────────────┼──────────────────┤
+   │ Lot Size                │ 1 (no lot)       │
+   │ Tick Size / Min Price   │ 0.01 USD         │
+   │ Quantity Precision      │ 8 decimals       │
+   │ Minimum Order Qty       │ 10 USDT value   │
+   │ Pip Value               │ N/A (no pips)    │
+   │ Multiplier              │ 1x               │
+   │ Contract Type           │ Spot (not futures)│
+   └─────────────────────────┴──────────────────┘
+   
+   PnL Calculation:
+   PnL = (sell_price - buy_price) × quantity
+   
+   Example:
+   Buy 1 BTC at 77468.99 USDT
+   Sell 1 BTC at 77469.00 USDT
+   PnL = (77469.00 - 77468.99) × 1 = +0.01 USDT
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2️⃣  FOREX (Spot - AllTick Standard)
+   Symbol Format: EURUSD, GBPUSD, USDJPY, USDINR
+   
+   Standard Specifications:
+   ┌─────────────────────────┬──────────────────┐
+   │ Property                │ Value            │
+   ├─────────────────────────┼──────────────────┤
+   │ Lot Size                │ 100,000 units    │
+   │ Tick Size / Pip         │ 0.0001 (4 decimals)
+   │ Quantity Precision      │ 2 decimals       │
+   │ Minimum Order           │ 0.01 lot         │
+   │ Pip Value (EUR/USD)     │ $10 per pip      │
+   │ Multiplier              │ 1x               │
+   │ Contract Type           │ Spot             │
+   │ Quote Precision         │ 5-6 decimals     │
+   └─────────────────────────┴──────────────────┘
+   
+   PnL Calculation:
+   PnL = (sell_price - buy_price) × quantity × lot_size
+   
+   Example:
+   Buy 1 lot EUR/USD at 1.15890
+   Sell 1 lot EUR/USD at 1.15895
+   Pips gained = (1.15895 - 1.15890) × 10000 = 5 pips
+   PnL = 5 pips × $10 per pip = $50 profit
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3️⃣  COMMODITIES/METALS (Spot - AllTick)
+   Symbol Format: XAUUSD (Gold), XAGUSD (Silver)
+   
+   Standard Specifications:
+   ┌─────────────────────────┬──────────────────┐
+   │ Property                │ Value            │
+   ├─────────────────────────┼──────────────────┤
+   │ Lot Size                │ 1 troy ounce     │
+   │ Tick Size / Pip         │ 0.01 USD         │
+   │ Quantity Precision      │ 2 decimals       │
+   │ Minimum Order           │ 0.01 oz          │
+   │ Pip Value (XAU/USD)     │ $0.01 per pip    │
+   │ Multiplier              │ 1x               │
+   │ Contract Type           │ Spot (not futures)
+   │ Quote Precision         │ 2 decimals       │
+   └─────────────────────────┴──────────────────┘
+   
+   PnL Calculation:
+   PnL = (sell_price - buy_price) × quantity
+   
+   Example:
+   Buy 10 oz XAU/USD at 4509.29
+   Sell 10 oz XAU/USD at 4510.29
+   PnL = (4510.29 - 4509.29) × 10 = +$100
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4️⃣  ALLTICK ACTUAL METADATA AVAILABILITY
+
+Current Plan ($199):
+  ✓ Market Data (depth-tick)
+  ✓ Quote prices
+  ✓ Order book depth
+  ✗ Contract specifications
+  ✗ Instrument metadata endpoint
+  ✗ Lot sizes, multipliers
+  ✗ Trading hours
+  ✗ Commission/fees
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5️⃣  HOW PnL SHOULD BE CALCULATED WITH ALLTICK
+
+Since AllTick ONLY provides prices/volumes, you need to:
+
+Option A: Use Standard Specifications (Recommended)
+├─ Store metadata in YOUR database or hardcode
+├─ Crypto: Use Binance standard specs (8 decimals, no multiplier)
+├─ Forex: Use standard 100k lot size + pip calculations
+└─ Metals: Use spot oz calculations
+
+Option B: Fetch from Broker Platform
+├─ Query Zerodha (NSE/NFO has metadata)
+├─ Query Binance API for crypto specs
+├─ This data doesn't come from AllTick
+
+Option C: Use Simple Price Difference
+├─ For UI purposes only
+├─ PnL = (current_price - entry_price) × qty
+├─ Works for all asset classes without metadata
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6️⃣  WEBSOCKET SUBSCRIPTION ACK (cmd_id 22005)
+
+When you subscribe to symbols, AllTick sends back:
+{
+  "cmd_id": 22005,           ← Subscription ack
+  "data": {
+    "code": "BTCUSDT",
+    "status": "subscribed"   
+  }
+}
+
+Does NOT contain metadata - only confirms subscription.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7️⃣  SUMMARY TABLE
+
+┌──────────┬──────────────────┬──────────────────┬──────────────────┐
+│ Asset    │ Lot Size         │ Tick Size        │ From AllTick?    │
+├──────────┼──────────────────┼──────────────────┼──────────────────┤
+│ Crypto   │ 1 (variable qty) │ 0.01 USD         │ ❌ NO            │
+│ Forex    │ 100,000 units    │ 0.0001 (1 pip)   │ ❌ NO            │
+│ Metals   │ 1 troy oz        │ 0.01 USD         │ ❌ NO            │
+│ Prices   │ N/A              │ Real-time data   │ ✅ YES (bids/asks)
+└──────────┴──────────────────┴──────────────────┴──────────────────┘
+

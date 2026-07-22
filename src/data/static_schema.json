@@ -1,0 +1,17 @@
+{
+  "users": ["id","username","password","transaction_password","full_name","mobile","role","status","parent_id","balance","credit_limit","exposure_multiplier","city","is_demo","created_at","updated_at"],
+  "user_documents": ["user_id","pan_number","pan_screenshot","aadhar_number","aadhar_front","aadhar_back","bank_proof","kyc_status","verified_at"],
+  "client_settings": ["user_id","allow_fresh_entry","allow_orders_between_hl","trade_equity_units","auto_close_at_m2m_pct","notify_at_m2m_pct","min_time_to_book_profit","scalping_sl_enabled"],
+  "broker_shares": ["user_id","share_pl_pct","share_brokerage_pct","share_swap_pct","brokerage_type","trading_clients_limit","sub_brokers_limit"],
+  "trades": ["id","user_id","symbol","type","order_type","qty","entry_price","exit_price","stop_loss","target_price","status","is_pending","entry_time","exit_time","pnl","margin_used","trade_ip"],
+  "ledger": ["id","user_id","amount","type","balance_after","remarks","created_at"],
+  "payment_requests": ["id","user_id","amount","type","status","screenshot_url","admin_remarks","created_at"],
+  "ip_logs": ["id","user_id","ip_address","browser","os","location","is_proxy","risk_score","timestamp"],
+  "ip_logins": ["id","user_id","username","ip_address","user_agent","timestamp"],
+  "signals": ["id","symbol","type","entry_price","target","stop_loss","message","is_active","created_at"],
+  "action_ledger": ["id","admin_id","action_type","target_table","description","timestamp"],
+  "scrip_data": ["id","symbol","lot_size","margin_req","status"],
+  "tickers": ["id","text","speed","is_active"],
+  "support_tickets": ["id","user_id","subject","message","admin_reply","priority","status","created_at"],
+  "global_configs": ["id","config_key","config_value","module","updated_at"]
+}
