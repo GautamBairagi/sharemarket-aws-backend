@@ -13,7 +13,14 @@
 const db = require('../config/db');
 const MarginUtils = require('../utils/MarginUtils');
 const openai = require('../config/openai');
+const axios = require('axios');
+const FormData = require('form-data');
+const { File } = require('buffer');
 const { parseQuery } = require('../services/aiCommandParser');
+
+if (typeof globalThis.File === 'undefined' && typeof File !== 'undefined') {
+    globalThis.File = File;
+}
 const { generateQuery } = require('../services/aiQueryGenerator');
 const { executeQuery } = require('../services/aiExecutor');
 const { loadSchema, getSchemaSummary } = require('../services/aiSchemaLoader');
@@ -962,17 +969,36 @@ const transcribeVoice = async (req, res) => {
     }
 
     try {
+        if (!process.env.OPENAI_API_KEY) {
+            return res.status(500).json({
+                success: false,
+                message: 'OpenAI API key is not configured',
+            });
+        }
+
         const audioBuffer = req.file.buffer;
         const fileName = req.file.originalname || 'audio.wav';
+        const contentType = req.file.mimetype || 'audio/wav';
 
-        // Call OpenAI Whisper API to transcribe
-        const transcript = await openai.audio.transcriptions.create({
-            file: new File([audioBuffer], fileName, { type: 'audio/wav' }),
-            model: 'whisper-1',
-            language: 'en', // or auto-detect if needed
+        const form = new FormData();
+        form.append('file', audioBuffer, {
+            filename: fileName,
+            contentType,
+            knownLength: audioBuffer.length,
+        });
+        form.append('model', 'whisper-1');
+        form.append('language', 'en');
+
+        const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', form, {
+            headers: {
+                ...form.getHeaders(),
+                Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+            },
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
         });
 
-        const transcribedText = transcript.text || '';
+        const transcribedText = response.data?.text || '';
 
         console.log('[transcribe-voice] ✅ Transcript:', transcribedText);
         console.log('═══════════════════════════════════════════════════════════════\n');
@@ -984,10 +1010,20 @@ const transcribeVoice = async (req, res) => {
         });
 
     } catch (err) {
-        console.error('[transcribe-voice] ❌ Error:', err.message);
-        return res.status(500).json({
+        const status = err?.response?.status || 500;
+        const openAiMessage = err?.response?.data?.error?.message || err.message || 'Failed to transcribe audio';
+        console.error('[transcribe-voice] ❌ Error:', openAiMessage);
+
+        if (status === 401) {
+            return res.status(401).json({
+                success: false,
+                message: 'OpenAI API key is invalid or expired. Please update the backend OPENAI_API_KEY and restart the server.',
+            });
+        }
+
+        return res.status(status).json({
             success: false,
-            message: err.message || 'Failed to transcribe audio',
+            message: openAiMessage,
         });
     }
 };
