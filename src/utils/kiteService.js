@@ -23,7 +23,7 @@ class KiteService {
         try {
             const db = require('../config/db');
             const [rows] = await db.execute(
-                'SELECT * FROM user_kite_sessions ORDER BY saved_at DESC LIMIT 1'
+                "SELECT * FROM user_kite_sessions WHERE access_token IS NOT NULL AND access_token != '' ORDER BY saved_at DESC LIMIT 1"
             );
             if (rows && rows.length > 0) {
                 const data = rows[0];

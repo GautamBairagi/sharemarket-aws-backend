@@ -177,13 +177,16 @@ class KiteController {
 
     status = async (req, res) => {
         try {
-            const userId = req.user.id;
-            // Check per-user DB session first
+            const userId = req.user?.id;
+            // Check per-user DB session first (with fallback to latest active platform session)
             const dbStatus = await kiteAuthService.getStatus(userId);
             if (dbStatus.connected) {
                 return res.json(dbStatus);
             }
-            // Fallback: check global kiteService (set by Zerodha callback or .env)
+            // Fallback: check global kiteService
+            if (!kiteService.isAuthenticated()) {
+                await kiteService.loadSessionFromDb();
+            }
             if (kiteService.isAuthenticated()) {
                 const globalStatus = kiteService.getStatus();
                 return res.json(globalStatus);

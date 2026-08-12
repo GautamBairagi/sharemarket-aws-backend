@@ -42,33 +42,67 @@ class KiteAuthService {
     }
 
     async getKiteInstance(userId) {
-        const session = await kiteRepo.getSessionByUserId(userId);
-        if (!session || !session.access_token) {
-            throw new Error('Kite not connected for this user');
+        let session = await kiteRepo.getSessionByUserId(userId);
+        let isValid = false;
+
+        if (session && session.access_token && session.saved_at) {
+            const savedDate = new Date(session.saved_at).toDateString();
+            const today = new Date().toDateString();
+            if (savedDate === today) isValid = true;
         }
 
-        // Session expiry check (Kite tokens expire daily around 6 AM)
-        const savedDate = new Date(session.saved_at).toDateString();
-        const today = new Date().toDateString();
-        if (savedDate !== today) {
+        // Fallback to latest global/platform session if per-user session is not active
+        if (!isValid) {
+            const latestSession = await kiteRepo.getLatestSession();
+            if (latestSession && latestSession.access_token && latestSession.saved_at) {
+                const savedDate = new Date(latestSession.saved_at).toDateString();
+                const today = new Date().toDateString();
+                if (savedDate === today) {
+                    session = latestSession;
+                    isValid = true;
+                }
+            }
+        }
+
+        if (!isValid || !session || !session.access_token) {
             throw new Error('Kite session expired. Please login again.');
         }
 
-        const kite = new KiteConnect({ api_key: session.api_key });
+        const kite = new KiteConnect({ api_key: session.api_key || API_KEY });
         kite.setAccessToken(session.access_token);
         return kite;
     }
 
     async getStatus(userId) {
         try {
-            const session = await kiteRepo.getSessionByUserId(userId);
-            if (!session) return { connected: false };
+            let session = await kiteRepo.getSessionByUserId(userId);
+            let isConnected = false;
 
-            const savedDate = new Date(session.saved_at).toDateString();
-            const today = new Date().toDateString();
+            if (session && session.saved_at) {
+                const savedDate = new Date(session.saved_at).toDateString();
+                const today = new Date().toDateString();
+                if (savedDate === today) {
+                    isConnected = true;
+                }
+            }
+
+            // Fallback to latest global/platform session if per-user session is not active
+            if (!isConnected) {
+                const latestSession = await kiteRepo.getLatestSession();
+                if (latestSession && latestSession.saved_at) {
+                    const savedDate = new Date(latestSession.saved_at).toDateString();
+                    const today = new Date().toDateString();
+                    if (savedDate === today) {
+                        session = latestSession;
+                        isConnected = true;
+                    }
+                }
+            }
+
+            if (!isConnected || !session) return { connected: false };
 
             return {
-                connected: savedDate === today,
+                connected: true,
                 user_name: session.user_name,
                 kite_user_id: session.kite_user_id,
                 email: session.email,

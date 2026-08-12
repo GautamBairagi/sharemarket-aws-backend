@@ -123,6 +123,9 @@ app.use('/api/alerts', alertRoutes);
 app.use('/api/margin', marginRoutes);
 app.use('/api/paper-trading', paperRoutes);
 
+const scripTickRoutes = require('./routes/scripTickRoutes');
+app.use('/api/scrip-ticks', scripTickRoutes);
+
 const marketDataRoutes = require('./routes/marketDataRoutes');
 app.use('/api/market-data', marketDataRoutes);
 
@@ -205,6 +208,10 @@ runMigrations()
         // Start weekly closing/settlement auto-cron job
         const { startWeeklySettlementJob } = require('./services/WeeklySettlementService');
         startWeeklySettlementJob();
+
+        // Start weekly script tick data export & purge cron job
+        const { initScripCleanupCron } = require('./services/scripCleanupCron');
+        initScripCleanupCron();
 
         // Initialize Market Data (Real Data Only - No Mock Fallback)
         try {

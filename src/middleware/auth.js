@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken');
 
 const authMiddleware = async (req, res, next) => {
-  const token = req.header('Authorization')?.replace('Bearer ', '');
+  const token = req.header('Authorization')?.replace('Bearer ', '') || req.query?.token;
   
   if (!token) {
     return res.status(401).json({ message: 'No token, authorization denied' });
@@ -11,11 +11,13 @@ const authMiddleware = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
 
-    // Check active session token in DB to prevent concurrent logins
-    const db = require('../config/db');
-    const [rows] = await db.execute('SELECT session_token FROM users WHERE id = ?', [decoded.id]);
-    if (rows.length === 0 || rows[0].session_token !== token) {
-      return res.status(401).json({ message: 'Session invalidated: Logged in on another device', concurrent_logout: true });
+    // Check active session token in DB to prevent concurrent logins ONLY for TRADER role
+    if (decoded.role === 'TRADER') {
+      const db = require('../config/db');
+      const [rows] = await db.execute('SELECT session_token FROM users WHERE id = ?', [decoded.id]);
+      if (rows.length === 0 || rows[0].session_token !== token) {
+        return res.status(401).json({ message: 'Session invalidated: Logged in on another device', concurrent_logout: true });
+      }
     }
 
     next();

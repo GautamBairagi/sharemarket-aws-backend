@@ -12,6 +12,15 @@ class KiteRepository {
         return rows[0] || null;
     }
 
+    async getLatestSession() {
+        const [rows] = await db.execute(
+            `SELECT * FROM user_kite_sessions 
+             WHERE access_token IS NOT NULL AND access_token != '' 
+             ORDER BY saved_at DESC LIMIT 1`
+        );
+        return rows[0] || null;
+    }
+
     async saveSession(userId, sessionData) {
         const {
             api_key,

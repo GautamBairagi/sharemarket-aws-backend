@@ -411,17 +411,25 @@ const placeOrder = async (req, res) => {
         else if (marketType === 'FOREX') scalpingStopLossEnabled = (clientConfig.forexConfig || {}).scalpingStopLoss === 'Enabled';
         else if (marketType === 'COMEX' || marketType === 'COMMODITY') scalpingStopLossEnabled = (clientConfig.comexConfig || {}).scalpingStopLoss === 'Enabled';
 
-        if (order_type !== 'MARKET' && !scalpingStopLossEnabled && minTimeSecondsForScalping > 0) {
-            // Check active (OPEN) trades of the same symbol in memory
-            const activeSameSymbolTrades = openTradesRows.filter(t => t.symbol === symbol);
+        // ─── MIN HOLD TIME / BOOK PROFIT CHECK ON OPPOSITE POSITION (WATCHLIST SQUARE OFF) ───
+        if (minTimeSecondsForScalping > 0) {
+            const oppositeType = type.toUpperCase() === 'BUY' ? 'SELL' : 'BUY';
+            const cleanSym = symbol.includes(':') ? symbol.split(':')[1] : symbol;
 
-            for (const activeTrade of activeSameSymbolTrades) {
+            const activeOppositeTrades = openTradesRows.filter(t => {
+                if (t.status !== 'OPEN' || t.is_pending) return false;
+                if ((t.type || '').toUpperCase() !== oppositeType) return false;
+                const tCleanSym = t.symbol.includes(':') ? t.symbol.split(':')[1] : t.symbol;
+                return t.symbol === symbol || t.symbol === sym || tCleanSym === cleanSym;
+            });
+
+            for (const activeTrade of activeOppositeTrades) {
                 const activeEntryTime = new Date(activeTrade.entry_time);
                 const secondsHeldActive = Math.floor((new Date() - activeEntryTime) / 1000);
                 if (secondsHeldActive < minTimeSecondsForScalping) {
                     const remaining = minTimeSecondsForScalping - secondsHeldActive;
                     return res.status(400).json({
-                        message: `Scalping Stop Loss is Disabled. Multiple orders on the same symbol are blocked during hold time. Please wait ${remaining} seconds before re-entering.`
+                        message: `Minimum hold time is ${minTimeSecondsForScalping} seconds. Please wait ${remaining} more second(s) before closing your position.`
                     });
                 }
             }
@@ -2291,6 +2299,40 @@ const restoreTrade = async (req, res) => {
         // On close: balance += pnl + margin. To reverse: balance -= (pnl + margin) then balance += 0 (margin stays locked)
         // Net: balance -= pnl (refund the PnL reversal, keep margin locked)
         const balanceDeduction = pnl; // Remove the PnL that was credited on close
+
+        // Option 1: Save historical snapshot with status 'DELETED' so it appears in Deleted Trades UI
+        try {
+            await db.execute(
+                `INSERT INTO trades (
+                    user_id, symbol, type, order_type, qty, entry_price, exit_price,
+                    margin_used, is_pending, market_type, status, trade_ip, created_by,
+                    trade_type, margin_type, entry_time, exit_time, pnl, brokerage, close_ip
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DELETED', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    trade.user_id,
+                    trade.symbol,
+                    trade.type,
+                    trade.order_type || 'MARKET',
+                    trade.qty,
+                    trade.entry_price,
+                    trade.exit_price,
+                    trade.margin_used || 0,
+                    trade.is_pending || 0,
+                    trade.market_type || 'MCX',
+                    trade.trade_ip || null,
+                    trade.created_by || null,
+                    trade.trade_type || 'INTRADAY',
+                    trade.margin_type || 'PER_LOT_BASIS',
+                    trade.entry_time || new Date(),
+                    trade.exit_time || new Date(),
+                    trade.pnl || 0,
+                    trade.brokerage || 0,
+                    trade.close_ip || trade.trade_ip || null
+                ]
+            );
+        } catch (snapshotErr) {
+            console.error('[restoreTrade] Failed to insert deleted trade snapshot:', snapshotErr.message);
+        }
 
         // Reopen the trade
         await db.execute(

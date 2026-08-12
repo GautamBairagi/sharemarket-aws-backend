@@ -958,6 +958,43 @@ const runMigrations = async () => {
         `, [item.symbol, item.category, item.lot_size, item.usdinr_value]);
     }
 
+    // ─── SCRIPT TICKS HISTORY & EXPORT SETTINGS ──────────────────────────────
+    await db.execute(`
+        CREATE TABLE IF NOT EXISTS scrip_ticks_history (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            scrip_id VARCHAR(100) NOT NULL,
+            exchange_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            system_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            bid DECIMAL(15,4) DEFAULT 0,
+            ask DECIMAL(15,4) DEFAULT 0,
+            high DECIMAL(15,4) DEFAULT 0,
+            low DECIMAL(15,4) DEFAULT 0,
+            ltp DECIMAL(15,4) DEFAULT 0,
+            market_type VARCHAR(50) DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_scrip_time (scrip_id, created_at),
+            INDEX idx_created_at (created_at),
+            INDEX idx_scrip_id (scrip_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    await db.execute(`
+        CREATE TABLE IF NOT EXISTS scrip_export_settings (
+            id INT PRIMARY KEY DEFAULT 1,
+            export_email VARCHAR(255) DEFAULT NULL,
+            export_destination ENUM('EMAIL', 'DRIVE', 'BOTH') DEFAULT 'EMAIL',
+            google_drive_folder_id VARCHAR(255) DEFAULT NULL,
+            auto_clean_days INT DEFAULT 7,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    // Insert default setting if missing
+    await db.execute(`
+        INSERT IGNORE INTO scrip_export_settings (id, export_email, export_destination, auto_clean_days)
+        VALUES (1, 'superadmin@trading.com', 'EMAIL', 7)
+    `);
+
     // ─── PERFORMANCE INDEXES ───────────────────────────────────────────────────
     console.log('\n📊 Adding performance indexes...');
 
