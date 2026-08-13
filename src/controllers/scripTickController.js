@@ -94,28 +94,19 @@ const getTickHistory = async (req, res) => {
             const isHourValid = hour !== undefined && hour !== '' && hour !== 'ALL';
             const isMinuteValid = minute !== undefined && minute !== '' && minute !== 'ALL';
 
-            let startIstStr = `${dateStr}T00:00:00+05:30`;
-            let endIstStr = `${dateStr}T23:59:59+05:30`;
-
             if (isHourValid && isMinuteValid) {
                 const hStr = String(hour).padStart(2, '0');
                 const mStr = String(minute).padStart(2, '0');
-                startIstStr = `${dateStr}T${hStr}:${mStr}:00+05:30`;
-                endIstStr = `${dateStr}T${hStr}:${mStr}:59+05:30`;
+                whereClauses.push('system_time BETWEEN ? AND ?');
+                params.push(`${dateStr} ${hStr}:${mStr}:00`, `${dateStr} ${hStr}:${mStr}:59`);
             } else if (isHourValid) {
                 const hStr = String(hour).padStart(2, '0');
-                startIstStr = `${dateStr}T${hStr}:00:00+05:30`;
-                endIstStr = `${dateStr}T${hStr}:59:59+05:30`;
+                whereClauses.push('system_time BETWEEN ? AND ?');
+                params.push(`${dateStr} ${hStr}:00:00`, `${dateStr} ${hStr}:59:59`);
+            } else {
+                whereClauses.push('system_time BETWEEN ? AND ?');
+                params.push(`${dateStr} 00:00:00`, `${dateStr} 23:59:59`);
             }
-
-            const dStart = new Date(startIstStr);
-            const dEnd = new Date(endIstStr);
-
-            const startUtcSql = dStart.toISOString().replace('T', ' ').slice(0, 19);
-            const endUtcSql = dEnd.toISOString().replace('T', ' ').slice(0, 19);
-
-            whereClauses.push('system_time BETWEEN ? AND ?');
-            params.push(startUtcSql, endUtcSql);
         }
 
         const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
@@ -221,15 +212,13 @@ const updateExportSettings = async (req, res) => {
 
 const formatISTTimestamp = (val) => {
     if (!val) return '';
+    if (typeof val === 'string' && val.length >= 19 && !val.includes('Z') && !val.includes('+')) {
+        return val.replace('T', ' ').slice(0, 19);
+    }
     const d = new Date(val);
     if (isNaN(d.getTime())) return String(val).slice(0, 19);
-    
-    // Convert to IST (+5:30)
-    const istOffset = 5.5 * 60 * 60 * 1000;
-    const istDate = new Date(d.getTime() + (d.getTimezoneOffset() * 60000) + istOffset);
-    
     const pad = (n) => String(n).padStart(2, '0');
-    return `${istDate.getFullYear()}-${pad(istDate.getMonth() + 1)}-${pad(istDate.getDate())} ${pad(istDate.getHours())}:${pad(istDate.getMinutes())}:${pad(istDate.getSeconds())}`;
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 };
 
 const formatPdfTimestamp = (val) => formatISTTimestamp(val);
