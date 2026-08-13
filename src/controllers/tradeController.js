@@ -63,6 +63,33 @@ const syncPaperPosition = async (userId, symbol, connection = db) => {
     }
 };
 
+const getTradeAgeInSeconds = (rawEntryTime) => {
+    if (!rawEntryTime) return 999999;
+    const nowMs = Date.now();
+    let entryMs;
+    if (typeof rawEntryTime === 'string') {
+        let str = rawEntryTime.trim();
+        if (!str.includes('Z') && !str.includes('+')) {
+            str = str.replace(' ', 'T') + 'Z';
+        }
+        entryMs = new Date(str).getTime();
+    } else if (rawEntryTime instanceof Date) {
+        entryMs = rawEntryTime.getTime();
+    } else {
+        entryMs = new Date(rawEntryTime).getTime();
+    }
+
+    if (isNaN(entryMs)) return 999999;
+
+    let diffSec = Math.floor((nowMs - entryMs) / 1000);
+    if (diffSec < 0) diffSec = 0;
+    if (diffSec >= 19700 && diffSec <= 20000) {
+        diffSec = diffSec - 19800;
+        if (diffSec < 0) diffSec = 0;
+    }
+    return diffSec;
+};
+
 /**
  * Place a New Order
  */
@@ -424,8 +451,7 @@ const placeOrder = async (req, res) => {
             });
 
             for (const activeTrade of activeOppositeTrades) {
-                const activeEntryTime = new Date(activeTrade.entry_time);
-                const secondsHeldActive = Math.floor((new Date() - activeEntryTime) / 1000);
+                const secondsHeldActive = getTradeAgeInSeconds(activeTrade.entry_time);
                 if (secondsHeldActive < minTimeSecondsForScalping) {
                     const remaining = minTimeSecondsForScalping - secondsHeldActive;
                     return res.status(400).json({
@@ -1953,9 +1979,7 @@ const closeTrade = async (req, res) => {
         else if (trade.market_type === 'FOREX') minTimeSeconds = parseInt((clientConfig.forexConfig || {}).minTimeToBookProfit || 0);
         else if (trade.market_type === 'COMEX' || trade.market_type === 'COMMODITY') minTimeSeconds = parseInt((clientConfig.comexConfig || {}).minTimeToBookProfit || 0);
 
-        const entryTime = new Date(trade.entry_time);
-        const now = new Date();
-        const secondsHeld = Math.floor((now - entryTime) / 1000);
+        const secondsHeld = getTradeAgeInSeconds(trade.entry_time);
         const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [trade.symbol]);
         const lotSize = (scripRows.length > 0) ? parseFloat(scripRows[0].lot_size || 1) : 1;
 
