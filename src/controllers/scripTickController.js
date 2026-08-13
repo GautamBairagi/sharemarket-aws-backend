@@ -94,19 +94,28 @@ const getTickHistory = async (req, res) => {
             const isHourValid = hour !== undefined && hour !== '' && hour !== 'ALL';
             const isMinuteValid = minute !== undefined && minute !== '' && minute !== 'ALL';
 
+            let startIstStr = `${dateStr}T00:00:00+05:30`;
+            let endIstStr = `${dateStr}T23:59:59+05:30`;
+
             if (isHourValid && isMinuteValid) {
                 const hStr = String(hour).padStart(2, '0');
                 const mStr = String(minute).padStart(2, '0');
-                whereClauses.push('system_time BETWEEN ? AND ?');
-                params.push(`${dateStr} ${hStr}:${mStr}:00`, `${dateStr} ${hStr}:${mStr}:59`);
+                startIstStr = `${dateStr}T${hStr}:${mStr}:00+05:30`;
+                endIstStr = `${dateStr}T${hStr}:${mStr}:59+05:30`;
             } else if (isHourValid) {
                 const hStr = String(hour).padStart(2, '0');
-                whereClauses.push('system_time BETWEEN ? AND ?');
-                params.push(`${dateStr} ${hStr}:00:00`, `${dateStr} ${hStr}:59:59`);
-            } else {
-                whereClauses.push('system_time BETWEEN ? AND ?');
-                params.push(`${dateStr} 00:00:00`, `${dateStr} 23:59:59`);
+                startIstStr = `${dateStr}T${hStr}:00:00+05:30`;
+                endIstStr = `${dateStr}T${hStr}:59:59+05:30`;
             }
+
+            const dStart = new Date(startIstStr);
+            const dEnd = new Date(endIstStr);
+
+            const startUtcSql = dStart.toISOString().replace('T', ' ').slice(0, 19);
+            const endUtcSql = dEnd.toISOString().replace('T', ' ').slice(0, 19);
+
+            whereClauses.push('system_time BETWEEN ? AND ?');
+            params.push(startUtcSql, endUtcSql);
         }
 
         const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
