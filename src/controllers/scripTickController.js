@@ -7,11 +7,33 @@ const path = require('path');
 /**
  * 1. Fetch All Active / Registered Scrip Symbols Across Segments
  */
+const isContractActive = (sym) => {
+    if (!sym) return false;
+    const months = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
+    const match = sym.match(/(\d{2})([A-Z]{3})/);
+    if (!match) return true; // Base symbols like BANKNIFTY, NIFTY, GOLD, etc.
+    
+    const year = 2000 + parseInt(match[1], 10);
+    const monthStr = match[2];
+    const month = months[monthStr];
+    if (month === undefined) return true;
+    
+    // Contract expires on the last day of the contract month at 23:59:59
+    const expiryDate = new Date(year, month + 1, 0, 23, 59, 59);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    return expiryDate >= today;
+};
+
+/**
+ * 1. Get Scrip List for Dropdown (Matching Active Trading / Rollover Contracts)
+ */
 const getScripList = async (req, res) => {
     try {
         const symbolSet = new Set();
 
-        // 1. Load active contracts from manually enabled & selected files (matching Live Quotes)
+        // 1. Load active contracts from manually enabled & selected files (matching Live Quotes & Rollover)
         const dataDir = path.join(__dirname, '../data');
         const manFile = path.join(dataDir, 'manually_enabled_contracts.json');
         const selFile = path.join(dataDir, 'selected_contracts.json');
@@ -33,7 +55,9 @@ const getScripList = async (req, res) => {
                         arr.forEach(sym => {
                             if (!excluded.has(sym)) {
                                 const clean = sym.includes(':') ? sym.split(':')[1] : sym;
-                                symbolSet.add(clean);
+                                if (isContractActive(clean)) {
+                                    symbolSet.add(clean);
+                                }
                             }
                         });
                     }
@@ -41,7 +65,7 @@ const getScripList = async (req, res) => {
             }
         });
 
-        // 2. Load active Market Group Items (excluding pure cash equities if requested)
+        // 2. Load active Market Group Items
         const [mgiRows] = await db.execute(`
             SELECT mgi.symbol 
             FROM market_group_items mgi 
@@ -51,13 +75,13 @@ const getScripList = async (req, res) => {
                OR mgi.symbol LIKE '%CE%' 
                OR mgi.symbol LIKE '%PE%'
         `);
-        mgiRows.forEach(r => r.symbol && symbolSet.add(r.symbol));
+        mgiRows.forEach(r => r.symbol && isContractActive(r.symbol) && symbolSet.add(r.symbol));
 
-        // 3. Load logged tick history scrip IDs
+        // 3. Load logged tick history scrip IDs (only non-expired)
         const [historyRows] = await db.execute(`
             SELECT DISTINCT scrip_id as symbol FROM scrip_ticks_history
         `);
-        historyRows.forEach(r => r.symbol && symbolSet.add(r.symbol));
+        historyRows.forEach(r => r.symbol && isContractActive(r.symbol) && symbolSet.add(r.symbol));
 
         const scrips = Array.from(symbolSet).sort();
         return res.json({ success: true, count: scrips.length, data: scrips });
