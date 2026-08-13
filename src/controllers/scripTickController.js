@@ -94,18 +94,36 @@ const getTickHistory = async (req, res) => {
             const isHourValid = hour !== undefined && hour !== '' && hour !== 'ALL';
             const isMinuteValid = minute !== undefined && minute !== '' && minute !== 'ALL';
 
-            if (isHourValid && isMinuteValid) {
-                const hStr = String(hour).padStart(2, '0');
-                const mStr = String(minute).padStart(2, '0');
+            const isUtcServer = new Date().getTimezoneOffset() === 0 || process.env.TZ === 'UTC';
+
+            if (isUtcServer) {
+                const hStart = isHourValid ? String(hour).padStart(2, '0') : '00';
+                const hEnd = isHourValid ? String(hour).padStart(2, '0') : '23';
+                const mStart = isMinuteValid ? String(minute).padStart(2, '0') : '00';
+                const mEnd = isMinuteValid ? String(minute).padStart(2, '0') : '59';
+
+                const dStart = new Date(`${dateStr}T${hStart}:${mStart}:00+05:30`);
+                const dEnd = new Date(`${dateStr}T${hEnd}:${mEnd}:59+05:30`);
+
                 whereClauses.push('system_time BETWEEN ? AND ?');
-                params.push(`${dateStr} ${hStr}:${mStr}:00`, `${dateStr} ${hStr}:${mStr}:59`);
-            } else if (isHourValid) {
-                const hStr = String(hour).padStart(2, '0');
-                whereClauses.push('system_time BETWEEN ? AND ?');
-                params.push(`${dateStr} ${hStr}:00:00`, `${dateStr} ${hStr}:59:59`);
+                params.push(
+                    dStart.toISOString().replace('T', ' ').slice(0, 19),
+                    dEnd.toISOString().replace('T', ' ').slice(0, 19)
+                );
             } else {
-                whereClauses.push('system_time BETWEEN ? AND ?');
-                params.push(`${dateStr} 00:00:00`, `${dateStr} 23:59:59`);
+                if (isHourValid && isMinuteValid) {
+                    const hStr = String(hour).padStart(2, '0');
+                    const mStr = String(minute).padStart(2, '0');
+                    whereClauses.push('system_time BETWEEN ? AND ?');
+                    params.push(`${dateStr} ${hStr}:${mStr}:00`, `${dateStr} ${hStr}:${mStr}:59`);
+                } else if (isHourValid) {
+                    const hStr = String(hour).padStart(2, '0');
+                    whereClauses.push('system_time BETWEEN ? AND ?');
+                    params.push(`${dateStr} ${hStr}:00:00`, `${dateStr} ${hStr}:59:59`);
+                } else {
+                    whereClauses.push('system_time BETWEEN ? AND ?');
+                    params.push(`${dateStr} 00:00:00`, `${dateStr} 23:59:59`);
+                }
             }
         }
 
@@ -212,11 +230,22 @@ const updateExportSettings = async (req, res) => {
 
 const formatISTTimestamp = (val) => {
     if (!val) return '';
-    if (typeof val === 'string' && val.length >= 19 && !val.includes('Z') && !val.includes('+')) {
+    const isUtcServer = new Date().getTimezoneOffset() === 0 || process.env.TZ === 'UTC';
+
+    if (!isUtcServer && typeof val === 'string' && val.length >= 19 && !val.includes('Z') && !val.includes('+')) {
         return val.replace('T', ' ').slice(0, 19);
     }
     const d = new Date(val);
     if (isNaN(d.getTime())) return String(val).slice(0, 19);
+
+    if (isUtcServer) {
+        // Convert UTC to IST (+5:30) for AWS EC2 server
+        const istOffset = 5.5 * 60 * 60 * 1000;
+        const istDate = new Date(d.getTime() + (d.getTimezoneOffset() * 60000) + istOffset);
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${istDate.getFullYear()}-${pad(istDate.getMonth() + 1)}-${pad(istDate.getDate())} ${pad(istDate.getHours())}:${pad(istDate.getMinutes())}:${pad(istDate.getSeconds())}`;
+    }
+
     const pad = (n) => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 };
