@@ -319,6 +319,16 @@ class KiteController {
             res.status(500).json({ error: err.message });
         }
     }
+
+    autoLogin = async (req, res) => {
+        try {
+            const kiteAutoLoginService = require('../services/KiteAutoLoginService');
+            const result = await kiteAutoLoginService.autoLogin(req.body || {});
+            res.json(result);
+        } catch (err) {
+            res.status(500).json({ success: false, error: err.message });
+        }
+    }
 }
 
 module.exports = new KiteController();

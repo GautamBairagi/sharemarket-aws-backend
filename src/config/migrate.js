@@ -228,7 +228,7 @@ const runMigrations = async () => {
             target_price DECIMAL(18,4) DEFAULT NULL,
             status       ENUM('OPEN','CLOSED','CANCELLED','DELETED') NOT NULL DEFAULT 'OPEN',
             is_pending   TINYINT(1) DEFAULT 0,
-            market_type  ENUM('MCX','EQUITY','COMEX','FOREX','CRYPTO','COMMODITY') DEFAULT 'MCX',
+            market_type  VARCHAR(50) DEFAULT 'MCX',
             entry_time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             exit_time    TIMESTAMP NULL DEFAULT NULL,
             pnl          DECIMAL(18,4) DEFAULT 0,
@@ -240,8 +240,8 @@ const runMigrations = async () => {
     `);
 
     // Add market_type to trades & scrip_data for existing DBs
-    await addColumn('trades', 'market_type', "ENUM('MCX','EQUITY','COMEX','FOREX','CRYPTO','COMMODITY') DEFAULT 'MCX' AFTER is_pending");
-    try { await db.execute("ALTER TABLE trades MODIFY COLUMN market_type ENUM('MCX','EQUITY','COMEX','FOREX','CRYPTO','COMMODITY') DEFAULT 'MCX'"); } catch (_) { }
+    await addColumn('trades', 'market_type', "VARCHAR(50) DEFAULT 'MCX' AFTER is_pending");
+    try { await db.execute("ALTER TABLE trades MODIFY COLUMN market_type VARCHAR(50) DEFAULT 'MCX'"); } catch (_) { }
     await addColumn('trades', 'brokerage', "DECIMAL(18,4) DEFAULT 0 AFTER pnl");
     await addColumn('trades', 'swap', "DECIMAL(18,4) DEFAULT 0 AFTER brokerage");
     await addColumn('trades', 'created_by', "INT DEFAULT NULL AFTER trade_ip");

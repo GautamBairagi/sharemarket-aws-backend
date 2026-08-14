@@ -6,6 +6,15 @@ const crypto = require('crypto');
 const API_KEY = process.env.KITE_API_KEY;
 const API_SECRET = process.env.KITE_API_SECRET;
 
+function getIstDateStr(dateLike = new Date()) {
+    if (!dateLike) return '';
+    try {
+        return new Date(dateLike).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' });
+    } catch (_) {
+        return new Date(dateLike).toDateString();
+    }
+}
+
 /**
  * Service to handle Zerodha Kite Authentication (per user).
  */
@@ -46,8 +55,8 @@ class KiteAuthService {
         let isValid = false;
 
         if (session && session.access_token && session.saved_at) {
-            const savedDate = new Date(session.saved_at).toDateString();
-            const today = new Date().toDateString();
+            const savedDate = getIstDateStr(session.saved_at);
+            const today = getIstDateStr();
             if (savedDate === today) isValid = true;
         }
 
@@ -55,8 +64,8 @@ class KiteAuthService {
         if (!isValid) {
             const latestSession = await kiteRepo.getLatestSession();
             if (latestSession && latestSession.access_token && latestSession.saved_at) {
-                const savedDate = new Date(latestSession.saved_at).toDateString();
-                const today = new Date().toDateString();
+                const savedDate = getIstDateStr(latestSession.saved_at);
+                const today = getIstDateStr();
                 if (savedDate === today) {
                     session = latestSession;
                     isValid = true;
@@ -79,8 +88,8 @@ class KiteAuthService {
             let isConnected = false;
 
             if (session && session.saved_at) {
-                const savedDate = new Date(session.saved_at).toDateString();
-                const today = new Date().toDateString();
+                const savedDate = getIstDateStr(session.saved_at);
+                const today = getIstDateStr();
                 if (savedDate === today) {
                     isConnected = true;
                 }
@@ -90,8 +99,8 @@ class KiteAuthService {
             if (!isConnected) {
                 const latestSession = await kiteRepo.getLatestSession();
                 if (latestSession && latestSession.saved_at) {
-                    const savedDate = new Date(latestSession.saved_at).toDateString();
-                    const today = new Date().toDateString();
+                    const savedDate = getIstDateStr(latestSession.saved_at);
+                    const today = getIstDateStr();
                     if (savedDate === today) {
                         session = latestSession;
                         isConnected = true;

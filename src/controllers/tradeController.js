@@ -66,13 +66,13 @@ const syncPaperPosition = async (userId, symbol, connection = db) => {
 const getTradeAgeInSeconds = (rawEntryTime) => {
     if (!rawEntryTime) return 999999;
     const nowMs = Date.now();
-    let entryMs;
+    let entryMs = 0;
     if (typeof rawEntryTime === 'string') {
-        let str = rawEntryTime.trim();
-        if (!str.includes('Z') && !str.includes('+')) {
-            str = str.replace(' ', 'T') + 'Z';
+        let clean = rawEntryTime.trim();
+        if (/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}$/.test(clean)) {
+            clean = clean.replace(' ', 'T');
         }
-        entryMs = new Date(str).getTime();
+        entryMs = new Date(clean).getTime();
     } else if (rawEntryTime instanceof Date) {
         entryMs = rawEntryTime.getTime();
     } else {
@@ -82,13 +82,182 @@ const getTradeAgeInSeconds = (rawEntryTime) => {
     if (isNaN(entryMs)) return 999999;
 
     let diffSec = Math.floor((nowMs - entryMs) / 1000);
+    if (diffSec >= 18000 && diffSec <= 21600) diffSec -= 19800;
+    else if (diffSec <= -18000 && diffSec >= -21600) diffSec += 19800;
     if (diffSec < 0) diffSec = 0;
-    if (diffSec >= 19700 && diffSec <= 20000) {
-        diffSec = diffSec - 19800;
-        if (diffSec < 0) diffSec = 0;
-    }
     return diffSec;
 };
+
+const parseOptionSymbol = (sym) => {
+    if (!sym) return null;
+    const clean = sym.includes(':') ? sym.split(':')[1] : sym;
+    const s = clean.replace(/[\s\-_]/g, '').toUpperCase();
+    
+    const matchType = s.match(/(CE|PE)$/);
+    if (!matchType) return null;
+    const optionType = matchType[1];
+    
+    const body = s.slice(0, -2);
+    
+    const optionRoots = [
+        'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTY',
+        'GOLDGUINEA', 'GOLDPETAL', 'GOLDM', 'GOLD', 'MGOLD',
+        'SILVERMIC', 'SILVERM', 'SILVER', 'MSILVER',
+        'CRUDEOILM', 'CRUDEOIL', 'MCRUDEOIL', 'NATURALGAS',
+        'COPPER', 'ZINC', 'LEAD', 'ALUMINIUM'
+    ];
+    
+    let root = '';
+    let remainder = body;
+    
+    for (const r of optionRoots) {
+        if (body.startsWith(r)) {
+            root = r;
+            remainder = body.slice(r.length);
+            break;
+        }
+    }
+    
+    if (!root) {
+        const rootMatch = body.match(/^([A-Z]+)/);
+        if (rootMatch) {
+            root = rootMatch[1];
+            remainder = body.slice(root.length);
+        }
+    }
+    
+    if (!root || !remainder) return null;
+    
+    let strike = '';
+    let expiry = '';
+    
+    const monthExpiryMatch = remainder.match(/^(\d{2}[A-Z]{3})(\d+)$/);
+    if (monthExpiryMatch) {
+        expiry = monthExpiryMatch[1];
+        strike = monthExpiryMatch[2];
+    } else if (remainder.length >= 8) {
+        const weeklyExpiryMatch = remainder.match(/^(\d{2}[0-9ONDA-Z]\d{2})(\d+)$/);
+        if (weeklyExpiryMatch) {
+            expiry = weeklyExpiryMatch[1];
+            strike = weeklyExpiryMatch[2];
+        } else {
+            strike = remainder.replace(/^.*?(\d{3,5})$/, '$1');
+        }
+    } else {
+        strike = remainder;
+    }
+    
+    return { root, strike, optionType, expiry };
+};
+
+const parseFuturesBaseSymbol = (sym) => {
+    if (!sym) return '';
+    const clean = sym.includes(':') ? sym.split(':')[1] : sym;
+    let s = clean.replace(/[\s\-_]/g, '').toUpperCase();
+    s = s.replace(/(EQ|BE|FUT)$/, '');
+    s = s.replace(/\d{2}[A-Z]{3}|\d{6}|\d{5}/g, '');
+    s = s.replace(/(FUT)$/, '');
+    return s;
+};
+
+const isSameInstrument = (sym1, sym2, marketType = '') => {
+    if (!sym1 || !sym2) return false;
+    const s1 = String(sym1).trim().toUpperCase();
+    const s2 = String(sym2).trim().toUpperCase();
+
+    if (s1 === s2) return true;
+
+    const clean1 = s1.includes(':') ? s1.split(':')[1] : s1;
+    const clean2 = s2.includes(':') ? s2.split(':')[1] : s2;
+    if (clean1 === clean2) return true;
+
+    const noSpace1 = clean1.replace(/[\s\-_]/g, '');
+    const noSpace2 = clean2.replace(/[\s\-_]/g, '');
+    if (noSpace1 === noSpace2) return true;
+
+    // MCX Scrip comparison using getMcxBaseScrip
+    const mcxBase1 = getMcxBaseScrip(s1) || getMcxBaseScrip(clean1);
+    const mcxBase2 = getMcxBaseScrip(s2) || getMcxBaseScrip(clean2);
+    if (mcxBase1 && mcxBase2 && mcxBase1 === mcxBase2) {
+        return true;
+    }
+
+    // Options matching
+    const opt1 = parseOptionSymbol(s1);
+    const opt2 = parseOptionSymbol(s2);
+    if (opt1 && opt2) {
+        return opt1.root === opt2.root && opt1.strike === opt2.strike && opt1.optionType === opt2.optionType;
+    }
+    if ((opt1 && !opt2) || (!opt1 && opt2)) {
+        return false;
+    }
+
+    // Futures / Stock base symbol matching (e.g. NFO:NIFTY26APRFUT vs NIFTY FUT)
+    const futBase1 = parseFuturesBaseSymbol(s1);
+    const futBase2 = parseFuturesBaseSymbol(s2);
+    if (futBase1 && futBase2 && futBase1 === futBase2) {
+        return true;
+    }
+
+    const eq1 = noSpace1.replace(/(EQ|BE)$/, '');
+    const eq2 = noSpace2.replace(/(EQ|BE)$/, '');
+    if (eq1 === eq2) return true;
+
+    const norm1 = noSpace1.replace(/USDT$/, 'USD');
+    const norm2 = noSpace2.replace(/USDT$/, 'USD');
+    if (norm1 === norm2) return true;
+
+    const COMMODITY_MAP = {
+        'XAU/USD': 'GOLD', 'XAUUSD': 'GOLD', 'GOLD': 'GOLD',
+        'XAG/USD': 'SILVER', 'XAGUSD': 'SILVER', 'SILVER': 'SILVER',
+        'USOIL': 'CRUDEOIL', 'CRUDEOIL': 'CRUDEOIL',
+        'NGAS': 'NATURALGAS', 'NATURALGAS': 'NATURALGAS'
+    };
+    const c1 = COMMODITY_MAP[clean1] || COMMODITY_MAP[noSpace1] || clean1;
+    const c2 = COMMODITY_MAP[clean2] || COMMODITY_MAP[noSpace2] || clean2;
+    if (c1 === c2) return true;
+
+    return false;
+};
+
+const getMinTimeToBookProfit = (marketType, clientConfig = {}, defaultMinTime = 0, symbol = '') => {
+    const mType = (marketType || '').toUpperCase();
+    const sym = (symbol || '').toUpperCase();
+    // Detect option contracts from symbol suffix even if marketType is stored as 'NFO'
+    const isOptionBySymbol = sym.endsWith('CE') || sym.endsWith('PE');
+    let seconds = -1;
+
+    if (mType === 'MCX' || mType.startsWith('MCX')) {
+        if (clientConfig.mcxMinTimeToBookProfit !== undefined && clientConfig.mcxMinTimeToBookProfit !== '') {
+            seconds = parseInt(clientConfig.mcxMinTimeToBookProfit || 0);
+        }
+    } else if (mType === 'OPTIONS' || mType.includes('OPT') || mType.includes('NFO_OPT') || isOptionBySymbol) {
+        if (clientConfig.optionsMinTimeToBookProfit !== undefined && clientConfig.optionsMinTimeToBookProfit !== '') {
+            seconds = parseInt(clientConfig.optionsMinTimeToBookProfit || 0);
+        }
+    } else if (mType === 'EQUITY' || mType === 'NSE' || mType === 'NFO' || mType.includes('EQ') || mType.includes('FUT')) {
+        if (clientConfig.equityMinTimeToBookProfit !== undefined && clientConfig.equityMinTimeToBookProfit !== '') {
+            seconds = parseInt(clientConfig.equityMinTimeToBookProfit || 0);
+        }
+    } else if (mType === 'CRYPTO') {
+        const val = (clientConfig.cryptoConfig || {}).minTimeToBookProfit ?? clientConfig.cryptoMinTimeToBookProfit;
+        if (val !== undefined && val !== '') seconds = parseInt(val || 0);
+    } else if (mType === 'FOREX') {
+        const val = (clientConfig.forexConfig || {}).minTimeToBookProfit ?? clientConfig.forexMinTimeToBookProfit;
+        if (val !== undefined && val !== '') seconds = parseInt(val || 0);
+    } else if (mType === 'COMEX' || mType === 'COMMODITY') {
+        const val = (clientConfig.comexConfig || {}).minTimeToBookProfit ?? clientConfig.comexMinTimeToBookProfit;
+        if (val !== undefined && val !== '') seconds = parseInt(val || 0);
+    }
+
+    if (seconds < 0) {
+        seconds = parseInt(clientConfig.min_time_to_book_profit || clientConfig.minTimeToBookProfit || defaultMinTime || 0);
+    }
+
+    return seconds;
+};
+
+
 
 /**
  * Place a New Order
@@ -184,7 +353,7 @@ const placeOrder = async (req, res) => {
             // 6. Banned scrip check
             db.execute('SELECT id FROM banned_scrips WHERE symbol = ?', [symbol]),
             // 7. All open trades for this user (to compute aggregations in memory)
-            db.execute('SELECT type, symbol, qty, entry_price, margin_used, pnl, is_pending, market_type, entry_time FROM trades WHERE user_id = ? AND status = "OPEN"', [targetUserId]),
+            db.execute('SELECT id, type, symbol, qty, entry_price, margin_used, pnl, is_pending, market_type, entry_time, status FROM trades WHERE user_id = ? AND status = "OPEN"', [targetUserId]),
             // 8. Banned limit orders check (only if limit order)
             (order_type !== 'MARKET' && price)
                 ? db.execute('SELECT id FROM banned_limit_orders WHERE scrip_id = ? AND start_time <= ? AND end_time >= ?', [symbol, nowTime, nowTime])
@@ -229,7 +398,8 @@ const placeOrder = async (req, res) => {
         // ─── DETECT MARKET TYPE EARLY (needed for all segment-specific validations) ───
         const sym = symbol.toUpperCase();
         const MCX_SYMBOLS = ['GOLD', 'GOLDM', 'SILVER', 'SILVERM', 'CRUDEOIL', 'COPPER', 'NICKEL', 'ZINC', 'LEAD', 'ALUMINIUM', 'ALUMINI', 'NATURALGAS', 'MENTHAOIL', 'COTTON', 'BULLDEX', 'CRUDEOIL MINI', 'ZINCMINI', 'LEADMINI', 'SILVER MIC', 'MGOLD', 'MCRUDEOIL', 'MSILVER', 'MNATURALGAS', 'MCOPPER', 'MLEAD', 'MZINC', 'MALUMINIUM'];
-        let marketType = 'MCX';
+        const isOptionSymbol = sym.endsWith('CE') || sym.endsWith('PE');
+        let marketType = 'EQUITY';
 
         // Check explicit prefix first
         if (sym.startsWith('COMMODITY:')) {
@@ -241,11 +411,19 @@ const placeOrder = async (req, res) => {
         } else if (sym.startsWith('FOREX:')) {
             marketType = 'FOREX';
         } else if (sym.startsWith('MCX:')) {
-            marketType = 'MCX';
-        } else if (sym.startsWith('NSE:') || sym.startsWith('NFO:')) {
-            marketType = sym.startsWith('NFO:') ? 'OPTIONS' : 'EQUITY';
+            // MCX prefix with CE/PE suffix = MCX Options → classify as OPTIONS
+            marketType = isOptionSymbol ? 'OPTIONS' : 'MCX';
+        } else if (sym.startsWith('NFO:')) {
+            if (isOptionSymbol || sym.includes('OPT')) {
+                marketType = 'OPTIONS';
+            } else {
+                marketType = 'EQUITY';
+            }
+        } else if (sym.startsWith('NSE:')) {
+            marketType = 'EQUITY';
         } else if (MCX_SYMBOLS.some(s => sym.includes(s))) {
-            marketType = 'MCX';
+            // Bare MCX symbol: check if it's an option
+            marketType = isOptionSymbol ? 'OPTIONS' : 'MCX';
         } else if (['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'DOT', 'AVAX', 'LTC', 'LINK'].some(c => sym.includes(c)) || sym.includes('USDT')) {
             marketType = 'CRYPTO';
         } else if (['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD', 'GBP/USD', 'EUR/USD', 'USD/JPY', 'USD/CHF', 'AUD/CAD'].some(f => sym.includes(f))) {
@@ -256,18 +434,40 @@ const placeOrder = async (req, res) => {
             marketType = 'COMEX';
         } else if (sym.startsWith('FOREX') || sym.includes('/')) {
             marketType = 'FOREX';
+        } else if (isOptionSymbol) {
+            marketType = 'OPTIONS';
         } else {
             marketType = 'EQUITY';
         }
 
-        // Apply Database Override for Market Type if defined
+        // Apply Database Override for Market Type if defined (NEVER override for CE/PE option contracts)
         const dbScrip = scripRows[0];
-        if (dbScrip && dbScrip.market_type) {
+        if (dbScrip && dbScrip.market_type && !isOptionSymbol) {
             marketType = dbScrip.market_type;
         }
 
         // ─── PARSE QUANTITY AND PRICE EARLY (needed for validations) ──────────────
         const qtyNum = parseInt(qty, 10);
+
+        const instType = req.body.instrument_type || '';
+        const isNSEEq = marketType === 'EQUITY' || (marketType === 'NSE' && instType === 'EQ');
+        const isNSEDer = (marketType === 'NSE' || marketType === 'NIFTY' || marketType === 'OPTIONS' || marketType === 'NFO') &&
+            ['FUT', 'CE', 'PE', 'OPT'].includes(instType);
+        const lotSz = dbScrip ? (parseFloat(dbScrip.lot_size) || 1) : 1;
+        const eqUnitsMode = req.body.equity_units_mode || 0;
+
+        let orderActualQty = qtyNum;
+        if (isNSEEq && eqUnitsMode === 1) {
+            orderActualQty = qtyNum;
+        } else if (isNSEEq && eqUnitsMode === 0) {
+            orderActualQty = qtyNum * lotSz;
+        } else if (isNSEDer && eqUnitsMode === 1) {
+            orderActualQty = qtyNum;
+        } else if (isNSEDer) {
+            orderActualQty = qtyNum * lotSz;
+        } else if (marketType === 'MCX') {
+            orderActualQty = qtyNum * lotSz;
+        }
 
         // 🚀 Live Price Fetcher (prioritize MarketDataService, then direct Kite API)
         let liveMarketPrice = null;
@@ -422,13 +622,7 @@ const placeOrder = async (req, res) => {
         }
 
         // ─── SCALPING STOP LOSS & SAME-SYMBOL HOLD TIME LOCK CHECK ───
-        let minTimeSecondsForScalping = 0;
-        if (marketType === 'MCX') minTimeSecondsForScalping = parseInt(clientConfig.mcxMinTimeToBookProfit || 0);
-        else if (marketType === 'EQUITY') minTimeSecondsForScalping = parseInt(clientConfig.equityMinTimeToBookProfit || 0);
-        else if (marketType === 'OPTIONS') minTimeSecondsForScalping = parseInt(clientConfig.optionsMinTimeToBookProfit || 0);
-        else if (marketType === 'CRYPTO') minTimeSecondsForScalping = parseInt((clientConfig.cryptoConfig || {}).minTimeToBookProfit || 0);
-        else if (marketType === 'FOREX') minTimeSecondsForScalping = parseInt((clientConfig.forexConfig || {}).minTimeToBookProfit || 0);
-        else if (marketType === 'COMEX' || marketType === 'COMMODITY') minTimeSecondsForScalping = parseInt((clientConfig.comexConfig || {}).minTimeToBookProfit || 0);
+        const minTimeSecondsForScalping = getMinTimeToBookProfit(marketType, clientConfig, clientSettingsRows[0]?.min_time_to_book_profit, symbol);
 
         let scalpingStopLossEnabled = false;
         if (marketType === 'MCX') scalpingStopLossEnabled = clientConfig.mcxScalpingStopLoss === 'Enabled';
@@ -438,28 +632,73 @@ const placeOrder = async (req, res) => {
         else if (marketType === 'FOREX') scalpingStopLossEnabled = (clientConfig.forexConfig || {}).scalpingStopLoss === 'Enabled';
         else if (marketType === 'COMEX' || marketType === 'COMMODITY') scalpingStopLossEnabled = (clientConfig.comexConfig || {}).scalpingStopLoss === 'Enabled';
 
-        // ─── MIN HOLD TIME / BOOK PROFIT CHECK ON OPPOSITE POSITION (WATCHLIST SQUARE OFF) ───
-        if (minTimeSecondsForScalping > 0) {
+        // ─── MIN HOLD TIME / BOOK PROFIT CHECK (WATCHLIST SQUARE OFF / LIMIT ORDERS) ───
+        if (minTimeSecondsForScalping > 0 && !scalpingStopLossEnabled) {
+            const isMarketOrder = order_type === 'MARKET';
             const oppositeType = type.toUpperCase() === 'BUY' ? 'SELL' : 'BUY';
-            const cleanSym = symbol.includes(':') ? symbol.split(':')[1] : symbol;
+            const isOptionScrip2 = symbol.toUpperCase().endsWith('CE') || symbol.toUpperCase().endsWith('PE') || marketType === 'OPTIONS';
 
             const activeOppositeTrades = openTradesRows.filter(t => {
-                if (t.status !== 'OPEN' || t.is_pending) return false;
+                if (t.is_pending) return false;
                 if ((t.type || '').toUpperCase() !== oppositeType) return false;
-                const tCleanSym = t.symbol.includes(':') ? t.symbol.split(':')[1] : t.symbol;
-                return t.symbol === symbol || t.symbol === sym || tCleanSym === cleanSym;
+                if (isSameInstrument(t.symbol, symbol, marketType)) return true;
+                if (isOptionScrip2) {
+                    const o1 = parseOptionSymbol(t.symbol);
+                    const o2 = parseOptionSymbol(symbol);
+                    if (o1 && o2 && o1.root === o2.root && o1.strike === o2.strike && o1.optionType === o2.optionType) return true;
+                }
+                return false;
             });
 
-            for (const activeTrade of activeOppositeTrades) {
-                const secondsHeldActive = getTradeAgeInSeconds(activeTrade.entry_time);
-                if (secondsHeldActive < minTimeSecondsForScalping) {
-                    const remaining = minTimeSecondsForScalping - secondsHeldActive;
-                    return res.status(400).json({
-                        message: `Minimum hold time is ${minTimeSecondsForScalping} seconds. Please wait ${remaining} more second(s) before closing your position.`
+            // If it is a Market order and there are no opposite trades to close, it is a same-direction entry, so skip block
+            const isSameDirectionMarket = isMarketOrder && activeOppositeTrades.length === 0;
+
+            if (!isSameDirectionMarket) {
+                // 1. Check opposite/close orders hold times (Market close / Limit close)
+                if (activeOppositeTrades.length > 0) {
+                    activeOppositeTrades.sort((a, b) => new Date(a.entry_time) - new Date(b.entry_time));
+
+                    const incomingQty = (isNSEEq || isNSEDer) ? orderActualQty : qtyNum;
+                    let remainingQtyToClose = incomingQty;
+
+                    for (const activeTrade of activeOppositeTrades) {
+                        if (remainingQtyToClose <= 0) break;
+
+                        const secondsHeldActive = getTradeAgeInSeconds(activeTrade.entry_time);
+                        if (secondsHeldActive < minTimeSecondsForScalping) {
+                            const remaining = minTimeSecondsForScalping - secondsHeldActive;
+                            return res.status(400).json({
+                                message: `Minimum hold time is ${minTimeSecondsForScalping} seconds. Please wait ${remaining} more second(s) before closing your position.`
+                            });
+                        }
+
+                        const activeTradeQty = parseFloat(activeTrade.qty) || 0;
+                        remainingQtyToClose -= activeTradeQty;
+                    }
+                }
+
+                // 2. If it is a Limit order ('Order' tab), block placing it if any active trade is within hold time
+                if (!isMarketOrder) {
+                    const activeSameTrades = openTradesRows.filter(t => {
+                        if (t.is_pending) return false;
+                        if (isSameInstrument(t.symbol, symbol, marketType)) return true;
+                        return false;
                     });
+
+                    for (const activeTrade of activeSameTrades) {
+                        const secondsHeldActive = getTradeAgeInSeconds(activeTrade.entry_time);
+                        if (secondsHeldActive < minTimeSecondsForScalping) {
+                            const remaining = minTimeSecondsForScalping - secondsHeldActive;
+                            return res.status(400).json({
+                                message: `Limit orders are blocked for ${symbol} during the active hold duration. Please wait ${remaining} more second(s).`
+                            });
+                        }
+                    }
                 }
             }
         }
+
+
 
         // ─── PERMANENT SCRIP BAN CHECK ──────────────────────────────────────────
         if (scripBanRows.length > 0) {
@@ -583,15 +822,19 @@ const placeOrder = async (req, res) => {
         }
 
         // ─── MAX LOT PER SCRIPT VALIDATION ───────────────────────────────────
+        const orderSide = type.toUpperCase() === 'BUY' ? 1 : -1;
+
         if (marketType === 'MCX') {
             const maxLotScrip = parseInt(clientConfig.mcxMaxLotScrip || 0);
             if (maxLotScrip > 0) {
-                const currentQtyForSymbol = openTradesRows.filter(t => t.symbol === symbol).reduce((sum, t) => sum + parseFloat(t.qty || 0), 0);
-                const newTotalForSymbol = currentQtyForSymbol + qtyNum;
+                const currentNetQty = openTradesRows
+                    .filter(t => t.symbol === symbol)
+                    .reduce((sum, t) => sum + (t.type.toUpperCase() === 'BUY' ? 1 : -1) * parseFloat(t.qty || 0), 0);
+                const newTotalForSymbol = Math.abs(currentNetQty + orderSide * qtyNum);
 
                 if (newTotalForSymbol > maxLotScrip) {
                     return res.status(400).json({
-                        message: `Max lot size for ${symbol} is ${maxLotScrip}. Current: ${currentQtyForSymbol}, New trade: ${qtyNum}, Total would be: ${newTotalForSymbol}`
+                        message: `Max lot size for ${symbol} is ${maxLotScrip}. Current Net: ${currentNetQty}, New order: ${qtyNum}, Total would be: ${newTotalForSymbol}`
                     });
                 }
             }
@@ -600,12 +843,15 @@ const placeOrder = async (req, res) => {
         if (marketType === 'EQUITY') {
             const maxLotScrip = parseInt(clientConfig.equityMaxScrip || 0);
             if (maxLotScrip > 0) {
-                const currentQtyForSymbol = openTradesRows.filter(t => t.symbol === symbol).reduce((sum, t) => sum + parseFloat(t.qty || 0), 0);
-                const newTotalForSymbol = currentQtyForSymbol + qtyNum;
+                const currentNetQty = openTradesRows
+                    .filter(t => t.symbol === symbol)
+                    .reduce((sum, t) => sum + (t.type.toUpperCase() === 'BUY' ? 1 : -1) * parseFloat(t.qty || 0), 0);
+                const incomingQty = (isNSEEq || isNSEDer) ? orderActualQty : qtyNum;
+                const newTotalForSymbol = Math.abs(currentNetQty + orderSide * incomingQty);
 
                 if (newTotalForSymbol > maxLotScrip) {
                     return res.status(400).json({
-                        message: `Max lot size for ${symbol} is ${maxLotScrip}. Current: ${currentQtyForSymbol}, New trade: ${qtyNum}, Total would be: ${newTotalForSymbol}`
+                        message: `Max lot size for ${symbol} is ${maxLotScrip}. Current Net: ${currentNetQty}, New trade: ${incomingQty}, Total would be: ${newTotalForSymbol}`
                     });
                 }
             }
@@ -614,24 +860,29 @@ const placeOrder = async (req, res) => {
         // ─── VALIDATE MAX POSITION SIZE ──────────────────────────────────────
         if (marketType === 'MCX') {
             const maxSizeAll = parseInt(clientConfig.mcxMaxSizeAll || 5000);
-            const currentOpenQty = openTradesRows.filter(t => (t.market_type || '').toUpperCase() === 'MCX').reduce((sum, t) => sum + parseFloat(t.qty || 0), 0);
-            const newTotal = currentOpenQty + qtyNum;
+            const currentNetAll = openTradesRows
+                .filter(t => (t.market_type || '').toUpperCase() === 'MCX')
+                .reduce((sum, t) => sum + (t.type.toUpperCase() === 'BUY' ? 1 : -1) * parseFloat(t.qty || 0), 0);
+            const newTotal = Math.abs(currentNetAll + orderSide * qtyNum);
 
             if (newTotal > maxSizeAll) {
                 return res.status(400).json({
-                    message: `Total MCX position limit is ${maxSizeAll}. Current: ${currentOpenQty}, New trade: ${qtyNum}, Total would be: ${newTotal}`
+                    message: `Total MCX position limit is ${maxSizeAll}. Current Net: ${currentNetAll}, New trade: ${qtyNum}, Total would be: ${newTotal}`
                 });
             }
         }
 
         if (marketType === 'EQUITY') {
             const maxSizeAll = parseInt(clientConfig.equityMaxSizeAll || 2000);
-            const currentOpenQty = openTradesRows.filter(t => (t.market_type || '').toUpperCase() === 'EQUITY').reduce((sum, t) => sum + parseFloat(t.qty || 0), 0);
-            const newTotal = currentOpenQty + qtyNum;
+            const currentNetAll = openTradesRows
+                .filter(t => (t.market_type || '').toUpperCase() === 'EQUITY')
+                .reduce((sum, t) => sum + (t.type.toUpperCase() === 'BUY' ? 1 : -1) * parseFloat(t.qty || 0), 0);
+            const incomingQty = (isNSEEq || isNSEDer) ? orderActualQty : qtyNum;
+            const newTotal = Math.abs(currentNetAll + orderSide * incomingQty);
 
             if (newTotal > maxSizeAll) {
                 return res.status(400).json({
-                    message: `Total Equity position limit is ${maxSizeAll}. Current: ${currentOpenQty}, New trade: ${qtyNum}, Total would be: ${newTotal}`
+                    message: `Total Equity position limit is ${maxSizeAll}. Current Net: ${currentNetAll}, New trade: ${incomingQty}, Total would be: ${newTotal}`
                 });
             }
         }
@@ -859,26 +1110,50 @@ const placeOrder = async (req, res) => {
 
         // ─── SHORT SELLING VALIDATION ────────────────────────────────────────
         if (type.toUpperCase() === 'SELL') {
-            let isShortSellingAllowed = true;
-            let deniedReason = '';
+            // Check if user holds an active BUY position for this instrument (position square-off)
+            // Note: openTradesRows is already filtered WHERE status='OPEN' so no status check needed
+            const isOptionScrip = symbol.toUpperCase().endsWith('CE') || symbol.toUpperCase().endsWith('PE') || marketType === 'OPTIONS';
+            const hasOpenBuyTrade = openTradesRows.some(t => {
+                if (t.is_pending) return false;
+                if ((t.type || '').toUpperCase() !== 'BUY') return false;
 
-            if (marketType === 'OPTIONS') {
-                if (symbol.includes('NIFTY') || symbol.includes('BANKNIFTY')) {
-                    isShortSellingAllowed = clientConfig.optionsIndexShortSelling === 'Yes';
-                    if (!isShortSellingAllowed) deniedReason = 'Options Index';
-                } else if (symbol.includes('MCX') || symbol.includes('GOLD') || symbol.includes('SILVER')) {
-                    isShortSellingAllowed = clientConfig.optionsMcxShortSelling === 'Yes';
-                    if (!isShortSellingAllowed) deniedReason = 'Options MCX';
-                } else {
-                    isShortSellingAllowed = clientConfig.optionsEquityShortSelling === 'Yes';
-                    if (!isShortSellingAllowed) deniedReason = 'Options Equity';
+                if (isSameInstrument(t.symbol, symbol, marketType)) return true;
+
+                // Extra option fallback: compare root+strike+optionType directly
+                if (isOptionScrip) {
+                    const opt1 = parseOptionSymbol(t.symbol);
+                    const opt2 = parseOptionSymbol(symbol);
+                    if (opt1 && opt2 && opt1.root === opt2.root && opt1.strike === opt2.strike && opt1.optionType === opt2.optionType) {
+                        return true;
+                    }
                 }
-            }
+                return false;
+            });
+            console.log(`[placeOrder] hasOpenBuyTrade=${hasOpenBuyTrade} for symbol=${symbol}, marketType=${marketType}, isOptionScrip=${isOptionScrip}`);
 
-            if (!isShortSellingAllowed) {
-                return res.status(400).json({
-                    message: `Short selling is not allowed for ${deniedReason || marketType} segment in your account`
-                });
+            // Only enforce short selling restrictions if NOT closing an existing BUY position
+            if (!hasOpenBuyTrade) {
+                let isShortSellingAllowed = true;
+                let deniedReason = '';
+
+                if (marketType === 'OPTIONS') {
+                    if (symbol.includes('NIFTY') || symbol.includes('BANKNIFTY')) {
+                        isShortSellingAllowed = clientConfig.optionsIndexShortSelling === 'Yes';
+                        if (!isShortSellingAllowed) deniedReason = 'Options Index';
+                    } else if (symbol.includes('MCX') || symbol.includes('GOLD') || symbol.includes('SILVER')) {
+                        isShortSellingAllowed = clientConfig.optionsMcxShortSelling === 'Yes';
+                        if (!isShortSellingAllowed) deniedReason = 'Options MCX';
+                    } else {
+                        isShortSellingAllowed = clientConfig.optionsEquityShortSelling === 'Yes';
+                        if (!isShortSellingAllowed) deniedReason = 'Options Equity';
+                    }
+                }
+
+                if (!isShortSellingAllowed) {
+                    return res.status(400).json({
+                        message: `Short selling is not allowed for ${deniedReason || marketType} segment in your account`
+                    });
+                }
             }
         }
 
@@ -924,12 +1199,14 @@ const placeOrder = async (req, res) => {
                 });
             }
 
-            const currentOptionsQtyForSymbol = openTradesRows.filter(t => t.symbol === symbol && (t.market_type || '').toUpperCase() === 'OPTIONS').reduce((sum, t) => sum + parseFloat(t.qty || 0), 0);
-            const newOptionsTotalForSymbol = currentOptionsQtyForSymbol + qtyNum;
+            const currentOptionsNetQty = openTradesRows
+                .filter(t => t.symbol === symbol && (t.market_type || '').toUpperCase() === 'OPTIONS')
+                .reduce((sum, t) => sum + (t.type.toUpperCase() === 'BUY' ? 1 : -1) * parseFloat(t.qty || 0), 0);
+            const newOptionsTotalForSymbol = Math.abs(currentOptionsNetQty + orderSide * qtyNum);
 
             if (newOptionsTotalForSymbol > maxLotScripConfig) {
                 return res.status(400).json({
-                    message: `Max lot size for ${symbol} is ${maxLotScripConfig}. Current: ${currentOptionsQtyForSymbol}, New: ${qtyNum}, Total would be: ${newOptionsTotalForSymbol}`
+                    message: `Max lot size for ${symbol} is ${maxLotScripConfig}. Current Net: ${currentOptionsNetQty}, New: ${qtyNum}, Total would be: ${newOptionsTotalForSymbol}`
                 });
             }
 
@@ -942,12 +1219,14 @@ const placeOrder = async (req, res) => {
                 maxOptionsSizeAll = parseInt(clientConfig.optionsMaxEquitySizeAll || 200);
             }
 
-            const currentAllOptionsQty = openTradesRows.filter(t => (t.market_type || '').toUpperCase() === 'OPTIONS').reduce((sum, t) => sum + parseFloat(t.qty || 0), 0);
-            const newAllOptionsTotal = currentAllOptionsQty + qtyNum;
+            const currentAllOptionsNetQty = openTradesRows
+                .filter(t => (t.market_type || '').toUpperCase() === 'OPTIONS')
+                .reduce((sum, t) => sum + (t.type.toUpperCase() === 'BUY' ? 1 : -1) * parseFloat(t.qty || 0), 0);
+            const newAllOptionsTotal = Math.abs(currentAllOptionsNetQty + orderSide * qtyNum);
 
             if (newAllOptionsTotal > maxOptionsSizeAll) {
                 return res.status(400).json({
-                    message: `Max OPTIONS position limit is ${maxOptionsSizeAll}. Current: ${currentAllOptionsQty}, New: ${qtyNum}, Total would be: ${newAllOptionsTotal}`
+                    message: `Max OPTIONS position limit is ${maxOptionsSizeAll}. Current Net: ${currentAllOptionsNetQty}, New: ${qtyNum}, Total would be: ${newAllOptionsTotal}`
                 });
             }
         }
@@ -1126,11 +1405,18 @@ const placeOrder = async (req, res) => {
             tradeMode = 'LOTS';
             console.log(`[placeOrder] ✅ NSE EQUITY LOTS MODE: ${qtyInput} lots × ${lotSizeAtEntry} = ${actualQty} shares`);
         }
+        else if (isNseDerivative && equityUnitsMode === 1) {
+            // ✅ NFO DERIVATIVES (FUT, CE, PE, OPT) UNITS MODE: actual_qty = qty_input
+            // Same as equity units mode – user enters raw units, not lots
+            actualQty = qtyInput;
+            tradeMode = 'UNITS';
+            console.log(`[placeOrder] ✅ NFO DERIVATIVE UNITS MODE (${instrumentType}): ${qtyInput} units`);
+        }
         else if (isNseDerivative) {
-            // ✅ NSE DERIVATIVES (FUT, CE, PE): ALWAYS LOTS, ignore units mode
+            // ✅ NSE DERIVATIVES LOTS MODE: actual_qty = qty_input × lot_size
             actualQty = qtyInput * lotSizeAtEntry;
             tradeMode = 'LOTS';
-            console.log(`[placeOrder] ✅ NSE DERIVATIVE (${instrumentType}): ${qtyInput} lots × ${lotSizeAtEntry} = ${actualQty}`);
+            console.log(`[placeOrder] ✅ NSE DERIVATIVE LOTS MODE (${instrumentType}): ${qtyInput} lots × ${lotSizeAtEntry} = ${actualQty}`);
         }
         else if (isMcx) {
             // ✅ MCX: actual_qty = qty_input × lot_size (standard lot-based calculation)
@@ -1705,7 +1991,8 @@ const getTrades = async (req, res) => {
                                 trade.usdinr_value = baseRate;
                             } else {
                                 const lotSize = parseFloat(trade.lot_size_at_entry || 1);
-                                const qtyForPnl = trade.qty * lotSize;
+                                const effectiveLotSize = (trade.trade_mode === 'UNITS' || trade.equity_units_mode === 1) ? 1 : lotSize;
+                                const qtyForPnl = trade.qty * effectiveLotSize;
                                 const entryPrice = parseFloat(trade.entry_price);
 
                                 if (trade.type === 'BUY') {
@@ -1966,26 +2253,31 @@ const closeTrade = async (req, res) => {
 
         // ─── VALIDATIONS (Min Time / Scalping SL) ─────────────────────────
         const [clientSettings] = await db.execute(
-            'SELECT config_json FROM client_settings WHERE user_id = ?',
+            'SELECT config_json, min_time_to_book_profit FROM client_settings WHERE user_id = ?',
             [trade.user_id]
         );
         const clientConfig = clientSettings.length > 0 ? JSON.parse(clientSettings[0].config_json || '{}') : {};
 
-        let minTimeSeconds = 0;
-        if (trade.market_type === 'MCX') minTimeSeconds = parseInt(clientConfig.mcxMinTimeToBookProfit || 0);
-        else if (trade.market_type === 'EQUITY') minTimeSeconds = parseInt(clientConfig.equityMinTimeToBookProfit || 0);
-        else if (trade.market_type === 'OPTIONS') minTimeSeconds = parseInt(clientConfig.optionsMinTimeToBookProfit || 0);
-        else if (trade.market_type === 'CRYPTO') minTimeSeconds = parseInt((clientConfig.cryptoConfig || {}).minTimeToBookProfit || 0);
-        else if (trade.market_type === 'FOREX') minTimeSeconds = parseInt((clientConfig.forexConfig || {}).minTimeToBookProfit || 0);
-        else if (trade.market_type === 'COMEX' || trade.market_type === 'COMMODITY') minTimeSeconds = parseInt((clientConfig.comexConfig || {}).minTimeToBookProfit || 0);
+        const minTimeSeconds = getMinTimeToBookProfit(trade.market_type, clientConfig, clientSettings[0]?.min_time_to_book_profit, trade.symbol);
+
+        let scalpingStopLossEnabled = false;
+        const mt = (trade.market_type || 'MCX').toUpperCase();
+        if (mt === 'MCX') scalpingStopLossEnabled = clientConfig.mcxScalpingStopLoss === 'Enabled';
+        else if (mt === 'EQUITY') scalpingStopLossEnabled = clientConfig.equityScalpingStopLoss === 'Enabled';
+        else if (mt === 'OPTIONS') scalpingStopLossEnabled = clientConfig.optionsScalpingStopLoss === 'Enabled';
+        else if (mt === 'CRYPTO') scalpingStopLossEnabled = (clientConfig.cryptoConfig || {}).scalpingStopLoss === 'Enabled';
+        else if (mt === 'FOREX') scalpingStopLossEnabled = (clientConfig.forexConfig || {}).scalpingStopLoss === 'Enabled';
+        else if (mt === 'COMEX' || mt === 'COMMODITY') scalpingStopLossEnabled = (clientConfig.comexConfig || {}).scalpingStopLoss === 'Enabled';
 
         const secondsHeld = getTradeAgeInSeconds(trade.entry_time);
         const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [trade.symbol]);
         const lotSize = (scripRows.length > 0) ? parseFloat(scripRows[0].lot_size || 1) : 1;
 
         const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
+        const isOptionTrade = cleanSymbol.endsWith('CE') || cleanSymbol.endsWith('PE');
         const marketTypeForClose = (trade.market_type || 'MCX').toUpperCase();
-        const prefixForClose = marketTypeForClose === 'EQUITY' ? 'NSE' : (marketTypeForClose === 'OPTIONS' ? 'NFO' : marketTypeForClose);
+        const effectiveMarketType = isOptionTrade ? 'OPTIONS' : marketTypeForClose;
+        const prefixForClose = effectiveMarketType === 'EQUITY' ? 'NSE' : (effectiveMarketType === 'OPTIONS' ? 'NFO' : effectiveMarketType);
 
         let livePriceForClose = null;
         const possibleSymbolsForClose = [trade.symbol, `${prefixForClose}:${cleanSymbol}`, cleanSymbol];
@@ -2004,7 +2296,7 @@ const closeTrade = async (req, res) => {
             ? (currentPrice - trade.entry_price) * actualQuantity
             : (trade.entry_price - currentPrice) * actualQuantity;
 
-        if (minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
+        if (minTimeSeconds > 0 && !scalpingStopLossEnabled && secondsHeld < minTimeSeconds) {
             return res.status(400).json({
                 message: `Minimum hold time is ${minTimeSeconds} seconds. Please wait ${minTimeSeconds - secondsHeld} more second(s).`,
                 remainingSeconds: minTimeSeconds - secondsHeld
@@ -2527,6 +2819,35 @@ const setTargetSL = async (req, res) => {
         }
 
         const trade = trades[0];
+
+        // ─── MIN HOLD TIME / SCALPING STOP LOSS VALIDATION FOR TARGET/SL ───
+        const [clientSettingsRows] = await db.execute(
+            'SELECT config_json, min_time_to_book_profit FROM client_settings WHERE user_id = ?',
+            [trade.user_id]
+        );
+        if (clientSettingsRows.length > 0) {
+            const clientConfig = JSON.parse(clientSettingsRows[0].config_json || '{}');
+            const minTimeSeconds = getMinTimeToBookProfit(trade.market_type, clientConfig, clientSettingsRows[0]?.min_time_to_book_profit, trade.symbol);
+
+            let scalpingStopLossEnabled = false;
+            const mt = (trade.market_type || 'MCX').toUpperCase();
+            if (mt === 'MCX') scalpingStopLossEnabled = clientConfig.mcxScalpingStopLoss === 'Enabled';
+            else if (mt === 'EQUITY') scalpingStopLossEnabled = clientConfig.equityScalpingStopLoss === 'Enabled';
+            else if (mt === 'OPTIONS') scalpingStopLossEnabled = clientConfig.optionsScalpingStopLoss === 'Enabled';
+            else if (mt === 'CRYPTO') scalpingStopLossEnabled = (clientConfig.cryptoConfig || {}).scalpingStopLoss === 'Enabled';
+            else if (mt === 'FOREX') scalpingStopLossEnabled = (clientConfig.forexConfig || {}).scalpingStopLoss === 'Enabled';
+            else if (mt === 'COMEX' || mt === 'COMMODITY') scalpingStopLossEnabled = (clientConfig.comexConfig || {}).scalpingStopLoss === 'Enabled';
+
+            if (minTimeSeconds > 0 && !scalpingStopLossEnabled) {
+                const secondsHeld = getTradeAgeInSeconds(trade.entry_time);
+                if (secondsHeld < minTimeSeconds) {
+                    const remaining = minTimeSeconds - secondsHeld;
+                    return res.status(400).json({
+                        message: `Target/SL cannot be set during the active hold duration of ${minTimeSeconds} seconds. Please wait ${remaining} more second(s).`
+                    });
+                }
+            }
+        }
 
         // Authorization check
         if (trade.user_id !== userId && req.user.role === 'TRADER') {

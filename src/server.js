@@ -213,6 +213,45 @@ runMigrations()
         const { initScripCleanupCron } = require('./services/scripCleanupCron');
         initScripCleanupCron();
 
+        // Schedule Zerodha Auto-Login (Mon-Fri at 8:30 AM before market open)
+        try {
+            const cron = require('node-cron');
+            const kiteAutoLoginService = require('./services/KiteAutoLoginService');
+
+            // Run at 8:30 AM IST Mon-Fri (Explicitly forced to Asia/Kolkata timezone for AWS UTC servers)
+            cron.schedule('30 8 * * 1-5', async () => {
+                console.log('⏰ [Cron] Triggering daily automated Zerodha login (8:30 AM IST)...');
+                try {
+                    await kiteAutoLoginService.autoLogin();
+                    console.log('✅ [Cron] Daily Zerodha auto-login successful!');
+                } catch (err) {
+                    console.error('❌ [Cron] Daily Zerodha auto-login failed:', err.message);
+                }
+            }, {
+                scheduled: true,
+                timezone: "Asia/Kolkata"
+            });
+            console.log('📅 Zerodha Auto-Login Cron scheduled for 8:30 AM IST (Asia/Kolkata timezone).');
+
+            // On server startup: attempt auto-login if credentials present & not connected
+            if (process.env.ZERODHA_USER_ID && process.env.ZERODHA_PASSWORD && process.env.ZERODHA_TOTP_SECRET) {
+                setTimeout(async () => {
+                    const kiteService = require('./utils/kiteService');
+                    if (!kiteService.isAuthenticated()) {
+                        console.log('ℹ️ Zerodha not connected on startup. Attempting automated login...');
+                        try {
+                            await kiteAutoLoginService.autoLogin();
+                            console.log('✅ Automated startup login successful!');
+                        } catch (e) {
+                            console.warn('⚠️ Automated startup login skipped/failed:', e.message);
+                        }
+                    }
+                }, 10000);
+            }
+        } catch (cronErr) {
+            console.warn('Could not initialize Zerodha auto-login cron:', cronErr.message);
+        }
+
         // Initialize Market Data (Real Data Only - No Mock Fallback)
         try {
             const db = require('./config/db');

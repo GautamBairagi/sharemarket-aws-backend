@@ -36,6 +36,22 @@ const login = async (req, res) => {
       return res.status(403).json({ message: 'Your account is suspended. Please contact superadmin.' });
     }
 
+    // Check if it is a Mobile App login request
+    const isMobileApp = req.body.deviceInfo && req.body.deviceInfo.includes('Mobile App');
+
+    // Check role restriction based on app source:
+    // 1. TRADER role cannot login on Web
+    if (user.role === 'TRADER' && !isMobileApp) {
+      console.log(`DEBUG: Trader login attempt on web blocked for user: ${username}`);
+      return res.status(403).json({ message: 'Please login to the VTKRM app for trading.' });
+    }
+
+    // 2. Non-TRADER roles (ADMIN, BROKER, SUPERADMIN) cannot login on Mobile App
+    if (user.role !== 'TRADER' && isMobileApp) {
+      console.log(`DEBUG: Non-trader login attempt on mobile blocked for user: ${username} (Role: ${user.role})`);
+      return res.status(403).json({ message: 'Only traders are allowed to login here.' });
+    }
+
     // KYC check for TRADER role
     if (user.role === 'TRADER') {
       try {

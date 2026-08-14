@@ -24,6 +24,9 @@ router.get('/callback', kiteController.callback);
 // Step 3: Manually set access token (user pastes token directly)
 router.post('/set-token', authMiddleware, kiteController.setToken);
 
+// Step 4: Automated Login via Puppeteer & TOTP
+router.post('/auto-login', authMiddleware, kiteController.autoLogin);
+
 // Check connection status
 router.get('/status', authMiddleware, kiteController.status);
 
@@ -528,6 +531,10 @@ function resolveNfoIndexSpotLtp(ltpQuotes, cfg) {
  * @returns {Promise<{ status: string, timestamp: string, counts: object, nseGroups: object, data: object, groups: object }>}
  */
 async function buildKiteDashboardPayload(userId) {
+    if (!kiteService.isAuthenticated()) {
+        await kiteService.ensureSessionValid();
+    }
+
     if (!kiteService.isAuthenticated() && userId) {
         try {
             const status = await kiteAuthService.getStatus(userId);
@@ -539,6 +546,10 @@ async function buildKiteDashboardPayload(userId) {
                 }
             }
         } catch (_) { }
+    }
+
+    if (!kiteService.isAuthenticated()) {
+        await kiteService.ensureSessionValid();
     }
 
     if (!kiteService.isAuthenticated()) {

@@ -151,6 +151,12 @@ class TradeService {
                 mType = 'COMEX';
             }
 
+            // Detect MCX option contracts (CE/PE suffix) → treat as OPTIONS for lot size
+            const tradeSymbolClean = (trade.symbol || '').includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
+            if ((tradeSymbolClean.endsWith('CE') || tradeSymbolClean.endsWith('PE')) && mType === 'MCX') {
+                mType = 'OPTIONS';
+            }
+
             // ══════════════════════════════════════════════════════════════════
             // LOT SIZE CALCULATION (Sync with dashboardController.js)
             // ══════════════════════════════════════════════════════════════════
@@ -348,7 +354,9 @@ class TradeService {
                     console.log(`[TradeService] Calculated Commodity P/L: ${pnl} INR (USD: ${calc.pnlUsd}, Lot Size: ${calc.lotSize}, USDINR: ${calc.usdInr})`);
                 } else {
                     // 🎯 FIXED: Always use (qty * lotSize) for consistent P/L across all segments
-                    const qtyForPnl = trade.qty * lotSize;
+                    // If trade is in units mode, quantity is already in units, so effective lotSize is 1.
+                    const effectiveLotSize = (trade.trade_mode === 'UNITS' || trade.equity_units_mode === 1) ? 1 : lotSize;
+                    const qtyForPnl = trade.qty * effectiveLotSize;
                     pnl = trade.type === 'BUY'
                         ? (finalExitPrice - trade.entry_price) * qtyForPnl
                         : (trade.entry_price - finalExitPrice) * qtyForPnl;
@@ -793,18 +801,33 @@ class TradeService {
     async executeNetting(userId, symbol, marketType, incomingTrade, connection) {
         console.log(`[executeNetting] Starting netting for user ${userId}, symbol ${symbol}, type ${incomingTrade.type}, qty ${incomingTrade.qty}`);
 
+        const { isSameInstrument } = require('../utils/symbolHelper');
         const oppositeType = incomingTrade.type === 'BUY' ? 'SELL' : 'BUY';
-        const [oppositeTrades] = await connection.execute(
+        const [allOppositeTrades] = await connection.execute(
             `SELECT t.*, cs.config_json, cs.broker_id 
              FROM trades t
              JOIN client_settings cs ON t.user_id = cs.user_id
-             WHERE t.user_id = ? AND t.symbol = ? AND t.market_type = ? AND t.type = ? AND t.status = 'OPEN' AND t.is_pending = 0
+             WHERE t.user_id = ? AND t.type = ? AND t.status = 'OPEN' AND t.is_pending = 0
              ORDER BY t.entry_time ASC`,
-            [userId, symbol, marketType, oppositeType]
+            [userId, oppositeType]
         );
 
+        const { parseOptionSymbol } = require('../utils/symbolHelper');
+        const isOptionScrip = symbol.toUpperCase().endsWith('CE') || symbol.toUpperCase().endsWith('PE') || marketType === 'OPTIONS';
+        const oppositeTrades = allOppositeTrades.filter(t => {
+            if (isSameInstrument(t.symbol, symbol, marketType)) return true;
+            if (isOptionScrip) {
+                const opt1 = parseOptionSymbol(t.symbol);
+                const opt2 = parseOptionSymbol(symbol);
+                if (opt1 && opt2 && opt1.root === opt2.root && opt1.strike === opt2.strike && opt1.optionType === opt2.optionType) {
+                    return true;
+                }
+            }
+            return false;
+        });
+
         if (oppositeTrades.length === 0) {
-            console.log(`[executeNetting] No opposite open trades found. No netting needed.`);
+            console.log(`[executeNetting] No opposite open trades found for ${symbol}. No netting needed.`);
             return { netted: false, remainingQty: incomingTrade.qty };
         }
 
@@ -837,7 +860,8 @@ class TradeService {
                 const calc = commodityLotService.calculatePnL(oppositeTrade.symbol, oppositeTrade.type, oppositeTrade.entry_price, exitPrice, closeQty);
                 pnl = calc.pnlInr;
             } else {
-                const qtyForPnl = closeQty * lotSize;
+                const effectiveLotSize = (oppositeTrade.trade_mode === 'UNITS' || oppositeTrade.equity_units_mode === 1) ? 1 : lotSize;
+                const qtyForPnl = closeQty * effectiveLotSize;
                 if (oppositeTrade.type === 'BUY') {
                     pnl = (exitPrice - oppositeTrade.entry_price) * qtyForPnl;
                 } else {
