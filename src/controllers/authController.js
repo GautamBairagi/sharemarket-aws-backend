@@ -197,9 +197,57 @@ const createUser = async (req, res) => {
     }
 
     try {
+        const finalParentId = parentId || req.user.id;
+
+        // Fetch parent details to check role-based limits
+        const [parentRows] = await db.execute('SELECT role FROM users WHERE id = ?', [finalParentId]);
+        if (parentRows.length === 0) {
+            return res.status(400).json({ message: 'Parent user not found' });
+        }
+        const parentRole = parentRows[0].role;
+
+        // Apply Broker Limit Enforcement
+        if (parentRole === 'BROKER') {
+            const roleUpper = (role || 'TRADER').toUpperCase();
+            
+            if (roleUpper === 'TRADER') {
+                // Check trading clients limit
+                const [shareRows] = await db.execute('SELECT trading_clients_limit FROM broker_shares WHERE user_id = ?', [finalParentId]);
+                const limit = shareRows[0] ? (shareRows[0].trading_clients_limit ?? 10) : 10;
+                
+                const [countRows] = await db.execute(`
+                    SELECT COUNT(*) AS count FROM users u
+                    LEFT JOIN client_settings cs ON u.id = cs.user_id
+                    WHERE u.role = 'TRADER' AND (u.parent_id = ? OR cs.broker_id = ?)
+                `, [finalParentId, finalParentId]);
+                const currentCount = countRows[0].count;
+
+                if (currentCount >= limit) {
+                    return res.status(400).json({ 
+                        message: `Limit reached: You have reached the limit of ${limit} trading clients. Cannot create more.` 
+                    });
+                }
+            } else if (roleUpper === 'BROKER') {
+                // Check sub-brokers limit
+                const [shareRows] = await db.execute('SELECT sub_brokers_limit FROM broker_shares WHERE user_id = ?', [finalParentId]);
+                const limit = shareRows[0] ? (shareRows[0].sub_brokers_limit ?? 3) : 3;
+                
+                const [countRows] = await db.execute(`
+                    SELECT COUNT(*) AS count FROM users 
+                    WHERE role = 'BROKER' AND parent_id = ?
+                `, [finalParentId]);
+                const currentCount = countRows[0].count;
+
+                if (currentCount >= limit) {
+                    return res.status(400).json({ 
+                        message: `Limit reached: You have reached the limit of ${limit} sub-brokers. Cannot create more.` 
+                    });
+                }
+            }
+        }
+
         const hashedPassword = await bcrypt.hash(password || '123456', 10);
 
-        const finalParentId = parentId || req.user.id;
         const params = [
             username || null,
             hashedPassword,
