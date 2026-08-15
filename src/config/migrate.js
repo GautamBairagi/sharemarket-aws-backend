@@ -545,6 +545,16 @@ const runMigrations = async () => {
     `);
 
     await db.execute(`
+        CREATE TABLE IF NOT EXISTS ticket_read_status (
+            user_id      INT NOT NULL,
+            ticket_id    INT NOT NULL,
+            last_read_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, ticket_id),
+            FOREIGN KEY (ticket_id) REFERENCES support_tickets(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    await db.execute(`
         CREATE TABLE IF NOT EXISTS internal_transfers (
             id           INT AUTO_INCREMENT PRIMARY KEY,
             from_user_id INT NOT NULL,
@@ -1029,6 +1039,11 @@ const runMigrations = async () => {
     // IP logins indexes
     await addIndex('ip_logins', 'idx_ip_logins_user_id', 'user_id');
     await addIndex('ip_logins', 'idx_ip_logins_timestamp', 'timestamp');
+
+    // Scrip Ticks History table indexes
+    await addIndex('scrip_ticks_history', 'idx_system_time', 'system_time');
+    await addIndex('scrip_ticks_history', 'idx_scrip_systime', 'scrip_id, system_time');
+    await addIndex('scrip_ticks_history', 'idx_scrip_id', 'scrip_id');
 
     // ─── ENSURE AUTO_INCREMENT ──────────────────────────────────────────────────
     console.log('\n🔧 Ensuring AUTO_INCREMENT on critical tables...');

@@ -61,31 +61,44 @@ const getTickets = async (req, res) => {
 
         if (role === 'SUPERADMIN') {
             [rows] = await db.execute(
-                `SELECT t.*, u.username, u.full_name, u.role AS user_role
+                `SELECT t.*, u.username, u.full_name, u.role AS user_role,
+                        (SELECT COUNT(*) FROM ticket_messages tm 
+                         WHERE tm.ticket_id = t.id AND tm.sender_id != ? 
+                           AND (NOT EXISTS (SELECT 1 FROM ticket_read_status trs WHERE trs.ticket_id = t.id AND trs.user_id = ?) 
+                                OR tm.created_at > (SELECT last_read_at FROM ticket_read_status trs WHERE trs.ticket_id = t.id AND trs.user_id = ?))) AS unread_count
                  FROM support_tickets t
                  JOIN users u ON t.user_id = u.id
-                 ORDER BY t.created_at DESC`
+                 ORDER BY t.created_at DESC`,
+                [userId, userId, userId]
             );
         } else if (role === 'ADMIN') {
             const descendantIds = await getDescendantIds(userId);
             if (!descendantIds.length) return res.json([]);
             const placeholders = descendantIds.map(() => '?').join(',');
             [rows] = await db.execute(
-                `SELECT t.*, u.username, u.full_name, u.role AS user_role
+                `SELECT t.*, u.username, u.full_name, u.role AS user_role,
+                        (SELECT COUNT(*) FROM ticket_messages tm 
+                         WHERE tm.ticket_id = t.id AND tm.sender_id != ? 
+                           AND (NOT EXISTS (SELECT 1 FROM ticket_read_status trs WHERE trs.ticket_id = t.id AND trs.user_id = ?) 
+                                OR tm.created_at > (SELECT last_read_at FROM ticket_read_status trs WHERE trs.ticket_id = t.id AND trs.user_id = ?))) AS unread_count
                  FROM support_tickets t
                  JOIN users u ON t.user_id = u.id
                  WHERE t.user_id IN (${placeholders})
                  ORDER BY t.created_at DESC`,
-                descendantIds
+                [userId, userId, userId, ...descendantIds]
             );
         } else {
             [rows] = await db.execute(
-                `SELECT t.*, u.username, u.full_name, u.role AS user_role
+                `SELECT t.*, u.username, u.full_name, u.role AS user_role,
+                        (SELECT COUNT(*) FROM ticket_messages tm 
+                         WHERE tm.ticket_id = t.id AND tm.sender_id != ? 
+                           AND (NOT EXISTS (SELECT 1 FROM ticket_read_status trs WHERE trs.ticket_id = t.id AND trs.user_id = ?) 
+                                OR tm.created_at > (SELECT last_read_at FROM ticket_read_status trs WHERE trs.ticket_id = t.id AND trs.user_id = ?))) AS unread_count
                  FROM support_tickets t
                  JOIN users u ON t.user_id = u.id
                  WHERE t.user_id = ?
                  ORDER BY t.created_at DESC`,
-                [userId]
+                [userId, userId, userId, userId]
             );
         }
 
@@ -100,6 +113,14 @@ const getTickets = async (req, res) => {
 const getTicketMessages = async (req, res) => {
     try {
         const ticketId = req.params.id;
+
+        // Mark ticket as read for the caller
+        await db.execute(`
+            INSERT INTO ticket_read_status (user_id, ticket_id, last_read_at)
+            VALUES (?, ?, NOW())
+            ON DUPLICATE KEY UPDATE last_read_at = NOW()
+        `, [req.user.id, ticketId]);
+
         const [messages] = await db.execute(
             `SELECT tm.*, u.username, u.full_name
              FROM ticket_messages tm
@@ -120,12 +141,57 @@ const addMessage = async (req, res) => {
     const { message } = req.body;
     if (!message) return res.status(400).json({ message: 'Message is required' });
     try {
-        await db.execute(
+        const [result] = await db.execute(
             'INSERT INTO ticket_messages (ticket_id, sender_id, sender_role, message) VALUES (?, ?, ?, ?)',
             [req.params.id, req.user.id, req.user.role, message]
         );
+        const newMessageId = result.insertId;
+
         // Bump updated_at so it floats to top
         await db.execute('UPDATE support_tickets SET updated_at = NOW() WHERE id = ?', [req.params.id]);
+
+        // Mark as read for sender
+        await db.execute(`
+            INSERT INTO ticket_read_status (user_id, ticket_id, last_read_at)
+            VALUES (?, ?, NOW())
+            ON DUPLICATE KEY UPDATE last_read_at = NOW()
+        `, [req.user.id, req.params.id]);
+
+        // Emit Socket.IO event for real-time update
+        try {
+            const [ticketRows] = await db.execute('SELECT user_id FROM support_tickets WHERE id = ?', [req.params.id]);
+            if (ticketRows.length > 0) {
+                const ticket = ticketRows[0];
+                const ticketOwnerId = ticket.user_id;
+
+                const SocketManager = require('../websocket/SocketManager');
+                const io = SocketManager.getIo();
+                if (io) {
+                    const payload = {
+                        ticketId: parseInt(req.params.id),
+                        message: {
+                            id: newMessageId,
+                            ticket_id: parseInt(req.params.id),
+                            sender_id: req.user.id,
+                            sender_role: req.user.role,
+                            message: message,
+                            created_at: new Date().toISOString(),
+                            username: req.user.username,
+                            full_name: req.user.fullName || req.user.username || 'System'
+                        }
+                    };
+
+                    if (['SUPERADMIN', 'ADMIN'].includes(req.user.role)) {
+                        io.to(`user:${ticketOwnerId}`).emit('support_message_received', payload);
+                    } else {
+                        io.to('role:ADMIN').to('role:SUPERADMIN').emit('support_message_received', payload);
+                    }
+                }
+            }
+        } catch (socketErr) {
+            console.error('Socket notification emit failed:', socketErr.message);
+        }
+
         res.status(201).json({ message: 'Message sent' });
     } catch (err) {
         console.error(err);

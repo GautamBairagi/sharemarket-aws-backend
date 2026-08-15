@@ -148,13 +148,13 @@ class KiteAutoLoginService {
             const session = await kiteService.handleCallback(capturedRequestToken);
             console.log(`[KiteAutoLogin] 🎉 Session created successfully! User: ${session.user_name || session.user_id}`);
 
-            // Save to per-user DB if userId provided or available
-            if (customCreds.userId) {
-                try {
-                    await kiteAuthService.saveTokenToDB(customCreds.userId, session.access_token, session);
-                } catch (dbErr) {
-                    console.error('[KiteAutoLogin] DB session save failed:', dbErr.message);
-                }
+            // Save to DB (default to User ID 1 if not specified)
+            const targetUserId = customCreds.userId || 1;
+            try {
+                await kiteAuthService.saveTokenToDB(targetUserId, session.access_token, session);
+                console.log(`[KiteAutoLogin] 💾 Session saved to DB for User ID ${targetUserId}`);
+            } catch (dbErr) {
+                console.error('[KiteAutoLogin] DB session save failed:', dbErr.message);
             }
 
             // Immediately re-initialize real-time market data socket feeds & WebSocket ticker
