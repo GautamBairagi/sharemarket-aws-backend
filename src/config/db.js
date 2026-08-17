@@ -25,7 +25,8 @@ if (process.env.DATABASE_URL) {
     uri: process.env.DATABASE_URL,
     connectionLimit: 15,
     waitForConnections: true,
-    queueLimit: 0
+    queueLimit: 0,
+    timezone: '+05:30' // Forces mysql2 driver to use IST
   });
 } else {
   console.log('🔌 Connecting using individual DB_Config variables (Local mode)');
@@ -36,7 +37,8 @@ if (process.env.DATABASE_URL) {
     waitForConnections: true,
     connectionLimit: 10,
     connectTimeout: 30000,
-    queueLimit: 0
+    queueLimit: 0,
+    timezone: '+05:30' // Forces mysql2 driver to use IST
   };
 
   // Use socketPath if provided (for XAMPP/MariaDB local connection)
@@ -50,10 +52,19 @@ if (process.env.DATABASE_URL) {
   pool = mysql.createPool(dbConfig);
 }
 
+// ─── FORCE MYSQL SESSION TO IST ──────────────────────────────────────────────
+// AWS RDS defaults to UTC. We force the session to IST so CURRENT_TIMESTAMP is correct.
+// We access the underlying callback pool via pool.pool in mysql2/promise.
+pool.pool.on('connection', (connection) => {
+  connection.query("SET time_zone = '+05:30';", (err) => {
+    if (err) console.error('⚠️ Failed to set DB session timezone to IST:', err.message);
+  });
+});
+
 // Test connection
 pool.getConnection()
   .then(connection => {
-    console.log('✅ MySQL Connected Successfully');
+    console.log('✅ MySQL Connected Successfully (Timezone: IST)');
     connection.release();
   })
   .catch(err => {
