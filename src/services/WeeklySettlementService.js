@@ -1,16 +1,12 @@
 const cron = require('node-cron');
 const db = require('../config/db');
 
-// Helper to get date representation in Asia/Kolkata timezone
+// Server runs in IST (TZ=Asia/Kolkata), so new Date() gives IST directly
 function getISTDate(date = new Date()) {
-    const options = { timeZone: 'Asia/Kolkata', year: 'numeric', month: 'numeric', day: 'numeric' };
-    const formatter = new Intl.DateTimeFormat('en-US', options);
-    const parts = formatter.formatToParts(date);
-    const year = parts.find(p => p.type === 'year').value;
-    const month = parts.find(p => p.type === 'month').value;
-    const day = parts.find(p => p.type === 'day').value;
-    return new Date(year, month - 1, day);
+    const d = new Date(date);
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate());
 }
+
 
 // Helper to calculate weekly boundaries
 function getWeekBoundaries(targetDate = new Date()) {

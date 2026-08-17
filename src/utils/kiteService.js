@@ -7,34 +7,19 @@ const BASE_URL = 'https://api.kite.trade';
 const API_KEY = process.env.KITE_API_KEY;
 const API_SECRET = process.env.KITE_API_SECRET;
 
+// Server runs in IST (TZ=Asia/Kolkata), so new Date() gives IST directly
 function getIstDateStr(dateLike = new Date()) {
     if (!dateLike) return '';
     try {
-        return new Date(dateLike).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' });
+        return new Date(dateLike).toLocaleDateString('en-IN');
     } catch (_) {
         return new Date(dateLike).toDateString();
     }
 }
 
 function getIstHourAndMinute() {
-    try {
-        const parts = new Intl.DateTimeFormat('en-US', {
-            timeZone: 'Asia/Kolkata',
-            hour: 'numeric',
-            minute: 'numeric',
-            hour12: false
-        }).formatToParts(new Date());
-        
-        let hour = 0, minute = 0;
-        parts.forEach(p => {
-            if (p.type === 'hour') hour = parseInt(p.value, 10);
-            if (p.type === 'minute') minute = parseInt(p.value, 10);
-        });
-        return { hour, minute };
-    } catch (_) {
-        const now = new Date();
-        return { hour: now.getHours(), minute: now.getMinutes() };
-    }
+    const now = new Date();
+    return { hour: now.getHours(), minute: now.getMinutes() };
 }
 
 class KiteService {

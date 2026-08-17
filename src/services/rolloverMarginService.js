@@ -14,12 +14,12 @@ const startRolloverMarginJob = () => {
             const [rules] = await db.execute('SELECT * FROM expiry_rules');
             if (!rules.length) return;
 
-            // ⚠️ TIMEZONE FIX: Railway runs in UTC. Convert to IST (UTC+5:30) before comparing.
+            // Server runs in IST (TZ=Asia/Kolkata), new Date() gives IST directly
             const now = new Date();
-            const istNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-            const currentH = istNow.getHours();
-            const currentM = istNow.getMinutes();
-            console.log(`[RolloverCheck] ⏰ IST Time: ${String(currentH).padStart(2, '0')}:${String(currentM).padStart(2, '0')} | UTC: ${now.toISOString()}`);
+            const currentH = now.getHours();
+            const currentM = now.getMinutes();
+            console.log(`[RolloverCheck] ⏰ IST Time: ${String(currentH).padStart(2, '0')}:${String(currentM).padStart(2, '0')}`);
+
 
             const [allTrades] = await db.execute(`
                 SELECT t.*, u.balance, cs.config_json

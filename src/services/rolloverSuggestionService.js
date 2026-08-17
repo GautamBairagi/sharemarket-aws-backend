@@ -46,7 +46,7 @@ const MARKET_CLOSE_TIME = {
 function parseExpiry(expiryStr) {
     if (!expiryStr) return null;
     // ISO format from Zerodha: "2025-06-25"
-    if (expiryStr.includes('-')) return new Date(expiryStr + 'T00:00:00+05:30');
+    if (expiryStr.includes('-')) return new Date(expiryStr + 'T00:00:00');
     // Legacy shorthand like "25JUN" or "25JUN25"
     const months = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
     const m = expiryStr.match(/^(\d{1,2})([A-Z]{3})(\d{2,4})?$/);
@@ -74,9 +74,8 @@ function daysRemaining(expiryDate) {
  */
 function isMarketClosed(segment) {
     const now = new Date();
-    const istTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-    const currentHour = istTime.getHours();
-    const currentMin = istTime.getMinutes();
+    const currentHour = now.getHours();
+    const currentMin = now.getMinutes();
 
     const closeTime = MARKET_CLOSE_TIME[segment] || MARKET_CLOSE_TIME.NSE;
 

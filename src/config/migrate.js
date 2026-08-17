@@ -1086,6 +1086,82 @@ const runMigrations = async () => {
         console.error('⚠️ Failed to check AUTO_INCREMENT status:', err.message);
     }
 
+    // ─── ONE-TIME UTC → IST DATA MIGRATION ────────────────────────────────────
+    // Runs ONLY ONCE on first deploy after server timezone changed to IST.
+    // Tracked via db_migrations_log table — safe to restart server anytime.
+    try {
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS db_migrations_log (
+                id     INT AUTO_INCREMENT PRIMARY KEY,
+                name   VARCHAR(100) NOT NULL UNIQUE,
+                ran_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        `);
+
+        const [alreadyRan] = await db.execute(
+            `SELECT id FROM db_migrations_log WHERE name = 'utc_to_ist_timestamp_fix'`
+        );
+
+        if (alreadyRan.length === 0) {
+            console.log('🕐 Running one-time UTC → IST timestamp migration (+330 minutes)...');
+
+            const tablesToMigrate = [
+                { table: 'trades',              cols: ['entry_time', 'exit_time'] },
+                { table: 'scrip_ticks_history', cols: ['exchange_time', 'system_time', 'created_at'] },
+                { table: 'notifications',       cols: ['created_at'] },
+                { table: 'ip_logins',           cols: ['timestamp'] },
+                { table: 'ip_logs',             cols: ['timestamp'] },
+                { table: 'ledger',              cols: ['created_at'] },
+                { table: 'payment_requests',    cols: ['created_at'] },
+                { table: 'action_ledger',       cols: ['timestamp'] },
+                { table: 'voice_recordings',    cols: ['created_at'] },
+                { table: 'alerts',              cols: ['triggered_at', 'created_at'] },
+                { table: 'support_tickets',     cols: ['created_at'] },
+                { table: 'ticket_messages',     cols: ['created_at'] },
+                { table: 'weekly_balances',     cols: ['created_at'] },
+                { table: 'internal_transfers',  cols: ['created_at'] },
+            ];
+
+            for (const { table, cols } of tablesToMigrate) {
+                try {
+                    const [tableExists] = await db.execute(
+                        `SELECT TABLE_NAME FROM information_schema.TABLES
+                         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
+                        [table]
+                    );
+                    if (!tableExists.length) continue;
+
+                    for (const col of cols) {
+                        const [colExists] = await db.execute(
+                            `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+                             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+                            [table, col]
+                        );
+                        if (!colExists.length) continue;
+
+                        await db.execute(`
+                            UPDATE \`${table}\`
+                            SET \`${col}\` = DATE_ADD(\`${col}\`, INTERVAL 330 MINUTE)
+                            WHERE \`${col}\` IS NOT NULL
+                        `);
+                        console.log(`  ✅ ${table}.${col} → UTC to IST converted`);
+                    }
+                } catch (err) {
+                    console.error(`  ⚠️ Migration failed for ${table}:`, err.message);
+                }
+            }
+
+            await db.execute(
+                `INSERT IGNORE INTO db_migrations_log (name) VALUES ('utc_to_ist_timestamp_fix')`
+            );
+            console.log('✅ UTC → IST timestamp migration complete.\n');
+        } else {
+            console.log('ℹ️  UTC → IST migration already applied. Skipping.\n');
+        }
+    } catch (err) {
+        console.error('⚠️ UTC → IST migration error:', err.message);
+    }
+
     console.log('✅ DB migrations complete\n');
 };
 

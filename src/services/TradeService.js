@@ -280,12 +280,12 @@ class TradeService {
             // 🔒 DEPTH DATA CHECK: Use cached bid/ask when Zerodha depth unavailable
             // ═══════════════════════════════════════════════════════════════════
 
-            // Get market close status
+            // Server runs in IST (TZ=Asia/Kolkata), new Date() gives IST directly
             const now = new Date();
-            const istTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-            const currentHour = istTime.getHours();
-            const currentMin = istTime.getMinutes();
+            const currentHour = now.getHours();
+            const currentMin = now.getMinutes();
             const isMcxMarketClosed = (mType === 'MCX' && (currentHour >= 23 || (currentHour === 23 && currentMin >= 30)));
+
 
             // Check if depth data was available from Zerodha
             let depthDataWasAvailable = false;

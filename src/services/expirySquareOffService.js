@@ -35,17 +35,17 @@ const startExpirySquareOffJob = () => {
             const [rules] = await db.execute('SELECT * FROM expiry_rules');
             if (!rules.length) return;
 
-            // ⚠️ TIMEZONE FIX: Railway runs in UTC. Convert to IST (UTC+5:30) before comparing.
+            // Server runs in IST (TZ=Asia/Kolkata), new Date() gives IST directly
             const now = new Date();
-            const istNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-            const currentH = istNow.getHours();
-            const currentM = istNow.getMinutes();
+            const currentH = now.getHours();
+            const currentM = now.getMinutes();
             const currentTimeStr = `${currentH.toString().padStart(2, '0')}:${currentM.toString().padStart(2, '0')}`;
 
             if (currentM % 10 === 0) { // Log every 10 mins to avoid spam
                 console.log(`[ExpirySquareOff] 🕒 Cron running at ${currentTimeStr} IST`);
             }
-            console.log(`[ExpirySquareOff] ⏰ IST Time: ${String(currentH).padStart(2, '0')}:${String(currentM).padStart(2, '0')} | UTC: ${now.toISOString()}`);
+            console.log(`[ExpirySquareOff] ⏰ IST Time: ${String(currentH).padStart(2, '0')}:${String(currentM).padStart(2, '0')}`);
+
 
             const [allUsers] = await db.execute('SELECT id, parent_id FROM users');
 
