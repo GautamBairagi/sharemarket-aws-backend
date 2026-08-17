@@ -57,8 +57,11 @@ class KiteAutoLoginService {
         let capturedRequestToken = null;
 
         try {
+            const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+
             browser = await puppeteer.launch({
                 headless: 'new',
+                executablePath,
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
@@ -66,7 +69,9 @@ class KiteAutoLoginService {
                     '--disable-accelerated-2d-canvas',
                     '--no-first-run',
                     '--no-zygote',
-                    '--disable-gpu'
+                    '--disable-gpu',
+                    '--single-process',
+                    '--ignore-certificate-errors'
                 ]
             });
 

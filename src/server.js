@@ -213,25 +213,39 @@ runMigrations()
         const { initScripCleanupCron } = require('./services/scripCleanupCron');
         initScripCleanupCron();
 
-        // Schedule Zerodha Auto-Login (Mon-Fri at 8:30 AM before market open)
+        // Schedule Zerodha Auto-Login (Mon-Fri at 8:30 AM IST / 3:00 AM UTC before market open)
         try {
             const cron = require('node-cron');
             const kiteAutoLoginService = require('./services/KiteAutoLoginService');
 
-            // Run at 8:30 AM IST Mon-Fri (Explicitly forced to Asia/Kolkata timezone for AWS UTC servers)
-            cron.schedule('30 8 * * 1-5', async () => {
-                console.log('⏰ [Cron] Triggering daily automated Zerodha login (8:30 AM IST)...');
-                try {
-                    await kiteAutoLoginService.autoLogin();
-                    console.log('✅ [Cron] Daily Zerodha auto-login successful!');
-                } catch (err) {
-                    console.error('❌ [Cron] Daily Zerodha auto-login failed:', err.message);
+            const runAutoLoginWithRetry = async () => {
+                console.log('⏰ [Cron] Triggering daily automated Zerodha login (8:30 AM IST / 3:00 AM UTC)...');
+                for (let attempt = 1; attempt <= 3; attempt++) {
+                    try {
+                        console.log(`[AutoLogin Cron] Attempt ${attempt}/3...`);
+                        await kiteAutoLoginService.autoLogin();
+                        console.log('✅ [Cron] Daily Zerodha auto-login successful!');
+                        return;
+                    } catch (err) {
+                        console.error(`❌ [Cron] Auto-login attempt ${attempt} failed:`, err.message);
+                        if (attempt < 3) await new Promise(r => setTimeout(r, 15000));
+                    }
                 }
-            }, {
+            };
+
+            // 1. Cron for IST Servers (8:30 AM IST)
+            cron.schedule('30 8 * * 1-5', runAutoLoginWithRetry, {
                 scheduled: true,
                 timezone: "Asia/Kolkata"
             });
-            console.log('📅 Zerodha Auto-Login Cron scheduled for 8:30 AM IST (Asia/Kolkata timezone).');
+
+            // 2. Cron for AWS UTC Servers (3:00 AM UTC = 8:30 AM IST)
+            cron.schedule('0 3 * * 1-5', runAutoLoginWithRetry, {
+                scheduled: true,
+                timezone: "UTC"
+            });
+
+            console.log('📅 Zerodha Auto-Login Cron scheduled for 8:30 AM IST (3:00 AM UTC) Mon-Fri with 3x retry.');
 
             // On server startup: attempt auto-login if credentials present & not connected
             if (process.env.ZERODHA_USER_ID && process.env.ZERODHA_PASSWORD && process.env.ZERODHA_TOTP_SECRET) {
