@@ -190,16 +190,14 @@ runMigrations()
         // Initialize Paper Trading Engine after DB is ready (if applicable)
         paperTradingEngine.start();
 
-        // Start Expiry Square-off, Rollover Margin, RMS, Target/SL, and Alert Monitoring services
+        // Start Expiry Square-off, RMS, Target/SL, and Alert Monitoring services
         const { startExpirySquareOffJob } = require('./services/expirySquareOffService');
-        const { startRolloverMarginJob } = require('./services/rolloverMarginService');
         const rmsService = require('./services/RMSService');
         const { startTargetSLMonitoring } = require('./services/targetSLService');
         const { startAlertMonitoring } = require('./services/alertMonitoringService');
         const { startPendingOrderMonitoring } = require('./services/PendingOrderService');
 
         startExpirySquareOffJob();
-        startRolloverMarginJob();
         rmsService.start(10000); // Check risk every 10 seconds
         startTargetSLMonitoring(); // Monitor target/SL every 5 seconds
         startAlertMonitoring(); // Monitor price alerts every 3 seconds
