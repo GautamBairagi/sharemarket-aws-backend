@@ -211,39 +211,69 @@ runMigrations()
         const { initScripCleanupCron } = require('./services/scripCleanupCron');
         initScripCleanupCron();
 
-        // Schedule Zerodha Auto-Login (Mon-Fri at 8:30 AM IST / 3:00 AM UTC before market open)
+        // Schedule Zerodha Auto-Login (Native IST Scheduler — Mon-Fri at 8:30 AM IST sharp)
         try {
-            const cron = require('node-cron');
             const kiteAutoLoginService = require('./services/KiteAutoLoginService');
 
             const runAutoLoginWithRetry = async () => {
-                console.log('⏰ [Cron] Triggering daily automated Zerodha login (8:30 AM IST / 3:00 AM UTC)...');
+                console.log('⏰ [IST Scheduler] Triggering daily automated Zerodha login (8:30 AM IST)...');
                 for (let attempt = 1; attempt <= 3; attempt++) {
                     try {
-                        console.log(`[AutoLogin Cron] Attempt ${attempt}/3...`);
+                        console.log(`[AutoLogin IST] Attempt ${attempt}/3...`);
                         await kiteAutoLoginService.autoLogin();
-                        console.log('✅ [Cron] Daily Zerodha auto-login successful!');
+                        console.log('✅ [AutoLogin IST] Daily Zerodha auto-login successful!');
                         return;
                     } catch (err) {
-                        console.error(`❌ [Cron] Auto-login attempt ${attempt} failed:`, err.message);
+                        console.error(`❌ [AutoLogin IST] Auto-login attempt ${attempt} failed:`, err.message);
                         if (attempt < 3) await new Promise(r => setTimeout(r, 15000));
                     }
                 }
             };
 
-            // 1. Cron for IST Servers (8:30 AM IST)
-            cron.schedule('30 8 * * 1-5', runAutoLoginWithRetry, {
-                scheduled: true,
-                timezone: "Asia/Kolkata"
-            });
+            let lastAutoLoginDate = '';
 
-            // 2. Cron for AWS UTC Servers (3:00 AM UTC = 8:30 AM IST)
-            cron.schedule('0 3 * * 1-5', runAutoLoginWithRetry, {
-                scheduled: true,
-                timezone: "UTC"
-            });
+            const checkAndRunIstAutoLogin = () => {
+                try {
+                    const now = new Date();
+                    const parts = new Intl.DateTimeFormat('en-US', {
+                        timeZone: 'Asia/Kolkata',
+                        weekday: 'short',
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: 'numeric',
+                        minute: 'numeric',
+                        hour12: false
+                    }).formatToParts(now);
 
-            console.log('📅 Zerodha Auto-Login Cron scheduled for 8:30 AM IST (3:00 AM UTC) Mon-Fri with 3x retry.');
+                    let weekday = '', year = '', month = '', day = '', hour = -1, minute = -1;
+                    parts.forEach(p => {
+                        if (p.type === 'weekday') weekday = p.value;
+                        if (p.type === 'year') year = p.value;
+                        if (p.type === 'month') month = p.value;
+                        if (p.type === 'day') day = p.value;
+                        if (p.type === 'hour') hour = parseInt(p.value, 10);
+                        if (p.type === 'minute') minute = parseInt(p.value, 10);
+                    });
+
+                    const currentDateStr = `${year}-${month}-${day}`;
+                    const isTradingDay = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday);
+
+                    // Trigger at exactly 08:30 AM IST on Trading Days (Mon-Fri) once per day
+                    if (isTradingDay && hour === 8 && minute === 30 && lastAutoLoginDate !== currentDateStr) {
+                        lastAutoLoginDate = currentDateStr;
+                        console.log(`⏰ [IST AutoLogin Scheduler] 8:30 AM IST detected on ${weekday} (${currentDateStr}). Triggering Zerodha Auto-Login...`);
+                        runAutoLoginWithRetry();
+                    }
+                } catch (err) {
+                    console.error('[IST Scheduler Error]:', err.message);
+                }
+            };
+
+            // Check every 10 seconds (Guarantees 8:30 AM IST execution regardless of server OS timezone)
+            setInterval(checkAndRunIstAutoLogin, 10000);
+
+            console.log('📅 Native IST Zerodha Auto-Login Scheduler initialized for 8:30 AM IST Mon-Fri.');
 
             // On server startup: attempt auto-login if credentials present & not connected
             if (process.env.ZERODHA_USER_ID && process.env.ZERODHA_PASSWORD && process.env.ZERODHA_TOTP_SECRET) {
@@ -261,7 +291,7 @@ runMigrations()
                 }, 10000);
             }
         } catch (cronErr) {
-            console.warn('Could not initialize Zerodha auto-login cron:', cronErr.message);
+            console.warn('Could not initialize Zerodha auto-login IST scheduler:', cronErr.message);
         }
 
         // Initialize Market Data (Real Data Only - No Mock Fallback)
