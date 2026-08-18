@@ -125,7 +125,7 @@ function getTokenSync(symbol) {
 
 // ── NIFTY 50 (50 stocks — Apr 2026 official list, Zerodha exact symbols) ──
 /** Bump when default unified watchlist shape changes (invalidates HTTP cache + precompute). */
-const WATCHLIST_CACHE_BUST = 'watchlist_v7_custom_mcx_continuous';
+const WATCHLIST_CACHE_BUST = 'watchlist_v8_all_nfo_stock_futures';
 
 /** NFO index options included in unified watchlist (instruments + quotes from Kite only). */
 const NFO_INDEX_OPTION_UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']);
@@ -447,18 +447,34 @@ async function refreshDashboardSymbols() {
     dashboardSymbolsRefreshing = true;
     try {
         console.log('🔄 Rebuilding Dashboard Symbols Cache in Background...');
-        const [mcxSymbols, nfoIndexFut, nfoStockFut] = await Promise.all([
-            buildFutSymbols('MCX', MCX_BASES, 6),
-            buildFutSymbols('NFO', NFO_INDICES, 4),
-            buildFutSymbols('NFO', NIFTY50, 1),
-        ]);
+        const now = new Date();
+        now.setHours(0, 0, 0, 0);
+
+        // Group all active NFO Futures by base symbol and pick nearest active expiry for each
+        const nfoGrouped = {};
+        (indexedInstruments.NFO?.FUT || []).forEach(i => {
+            const expDate = new Date(i.expiry || 0);
+            if (expDate >= now) {
+                const base = (i.name || i.tradingsymbol.replace(/\d{1,2}[A-Z]{3}\d{0,2}FUT$/i, '')).toUpperCase();
+                if (!nfoGrouped[base]) nfoGrouped[base] = [];
+                nfoGrouped[base].push(i);
+            }
+        });
+
+        const nfoFutSymbols = [];
+        Object.values(nfoGrouped).forEach(list => {
+            list.sort((a, b) => new Date(a.expiry || 0) - new Date(b.expiry || 0));
+            if (list[0]) nfoFutSymbols.push(`NFO:${list[0].tradingsymbol}`);
+        });
+
+        const mcxSymbols = await buildFutSymbols('MCX', MCX_BASES, 6);
 
         dashboardSymbolsCache = {
             mcxSymbols,
-            nfoSymbols: [...nfoIndexFut, ...nfoStockFut],
+            nfoSymbols: nfoFutSymbols,
         };
         dashboardSymbolsCacheTime = Date.now();
-        console.log('✅ Dashboard Symbols Cache Ready');
+        console.log(`✅ Dashboard Symbols Cache Ready: MCX(${mcxSymbols.length}), NFO Fut(${nfoFutSymbols.length})`);
     } catch (err) {
         console.error('Failed to rebuild dashboard symbols:', err.message);
     } finally {
@@ -974,7 +990,7 @@ function _getPrecomputed(instruments, query) {
     const nfoFutIdx = indexedInstruments['NFO']?.FUT || [];
     const nfoFutByBase = {}; // UPPERCASE name → [{tradingsymbol, expiry, fullKey}]
     for (const inst of nfoFutIdx) {
-        const name = String(inst.name || '').toUpperCase();
+        const name = String(inst.name || inst.tradingsymbol.replace(/\d{1,2}[A-Z]{3}\d{0,2}FUT$/i, '')).toUpperCase().trim();
         const exp = new Date(inst.expiry || 0);
         if (exp < today) continue;
         if (!nfoFutByBase[name]) nfoFutByBase[name] = [];
@@ -985,9 +1001,9 @@ function _getPrecomputed(instruments, query) {
             .sort((a, b) => new Date(a.expiry) - new Date(b.expiry))
             .slice(0, 3);
     }
-    // nfoFutKeys for STOCKS is intentionally left empty here — _buildWatchlistData populates it
-    // after applying the excluded filter from Contract Management.
-    const nfoStockUniverse = ALL_NSE_STOCKS.length > 0 ? ALL_NSE_STOCKS : NIFTY50;
+    // Include ALL active NFO stock futures bases from indexed instruments (not restricted to old NIFTY50 array)
+    const allNfoStockBases = Object.keys(nfoFutByBase);
+    const nfoStockUniverse = allNfoStockBases.length > 0 ? allNfoStockBases : (ALL_NSE_STOCKS.length > 0 ? ALL_NSE_STOCKS : NIFTY50);
 
     // Build NFO/MCX option instrument index ONCE (avoid scanning 100K per underlying)
     const nfoOptIndex = {}; // underlying → [{ inst, strike, type, expiry }]

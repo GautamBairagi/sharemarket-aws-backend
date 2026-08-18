@@ -726,17 +726,21 @@ function getMarketWatchContracts(instruments, ltpQuotes = {}, mcxNearestFutKeyIn
             }
         }
 
-        // NFO: Futures & Options for index/stock bases
+        // NFO: Allow ALL Futures contracts for all NFO/NSE stock and index futures
         if (ex === 'NFO') {
-            const isWatchBase = nfoBaseSet.has(baseName);
-            if (isWatchBase && (type === 'FUT' || type === 'CE' || type === 'PE')) {
+            if (type === 'FUT') {
                 included = true;
+            } else {
+                const isWatchBase = nfoBaseSet.has(baseName);
+                if (isWatchBase && (type === 'CE' || type === 'PE')) {
+                    included = true;
+                }
             }
         }
 
-        // NSE: Only Futures for known NFO bases (NSE-listed stock futures)
+        // NSE: Allow Futures for all NSE stock futures
         if (ex === 'NSE' && type === 'FUT') {
-            if (nfoBaseSet.has(baseName)) included = true;
+            included = true;
         }
 
         if (!included) return;
