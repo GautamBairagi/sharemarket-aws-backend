@@ -211,26 +211,27 @@ runMigrations()
         const { initScripCleanupCron } = require('./services/scripCleanupCron');
         initScripCleanupCron();
 
-        // Schedule Zerodha Auto-Login (Native IST Scheduler — Mon-Fri at 8:30 AM IST sharp)
+        // Schedule Zerodha Auto-Login (Native IST Scheduler — Mon-Fri at 8:30 AM IST sharp + Server Startup check)
         try {
             const kiteAutoLoginService = require('./services/KiteAutoLoginService');
 
-            const runAutoLoginWithRetry = async () => {
-                console.log('⏰ [IST Scheduler] Triggering daily automated Zerodha login at 8:30 AM IST...');
+            const runAutoLoginWithRetry = async (label = '8:30 AM IST') => {
+                console.log(`⏰ [IST Scheduler] Triggering automated Zerodha login (${label})...`);
                 for (let attempt = 1; attempt <= 3; attempt++) {
                     try {
-                        console.log(`[AutoLogin IST 8:30 AM] Attempt ${attempt}/3...`);
+                        console.log(`[AutoLogin IST ${label}] Attempt ${attempt}/3...`);
                         await kiteAutoLoginService.autoLogin();
-                        console.log('✅ [AutoLogin IST 8:30 AM] Daily Zerodha auto-login successful!');
-                        return;
+                        console.log(`✅ [AutoLogin IST ${label}] Automated Zerodha login successful!`);
+                        return true;
                     } catch (err) {
-                        console.error(`❌ [AutoLogin IST 8:30 AM] Attempt ${attempt}/3 failed:`, err.message);
+                        console.error(`❌ [AutoLogin IST ${label}] Attempt ${attempt}/3 failed:`, err.message);
                         if (attempt < 3) {
                             console.log('⏳ Retrying Zerodha auto-login in 15 seconds...');
                             await new Promise(r => setTimeout(r, 15000));
                         }
                     }
                 }
+                return false;
             };
 
             let lastAutoLoginDate = '';
@@ -267,9 +268,9 @@ runMigrations()
                     if (isTradingDay && hour === 8 && minute === 30 && lastAutoLoginDate !== currentDateStr && !isAutoLoggingInProgress) {
                         lastAutoLoginDate = currentDateStr; // Mark today done immediately to prevent re-trigger
                         isAutoLoggingInProgress = true;
-                        console.log(`⏰ [IST AutoLogin Scheduler] 8:30 AM IST detected on ${weekday} (${currentDateStr}). Triggering Zerodha Auto-Login (3 attempts with 15s intervals)...`);
+                        console.log(`⏰ [IST AutoLogin Scheduler] 8:30 AM IST detected on ${weekday} (${currentDateStr}). Triggering Zerodha Auto-Login (3 attempts x 15s intervals)...`);
                         try {
-                            await runAutoLoginWithRetry();
+                            await runAutoLoginWithRetry('8:30 AM IST Cron');
                         } finally {
                             isAutoLoggingInProgress = false;
                         }
@@ -283,6 +284,25 @@ runMigrations()
             setInterval(checkAndRunIstAutoLogin, 5000);
 
             console.log('📅 Native IST Zerodha Auto-Login Scheduler initialized for 8:30 AM IST sharp Mon-Fri (3 attempts x 15s retry).');
+
+            // On Server Startup / Restart: Check if session is valid today. If not connected, trigger auto-login!
+            if (process.env.ZERODHA_USER_ID && process.env.ZERODHA_PASSWORD && process.env.ZERODHA_TOTP_SECRET) {
+                setTimeout(async () => {
+                    const kiteService = require('./utils/kiteService');
+                    const sessionValid = await kiteService.ensureSessionValid();
+                    if (!sessionValid && !isAutoLoggingInProgress) {
+                        isAutoLoggingInProgress = true;
+                        console.log('ℹ️ [Startup] Zerodha not connected on server start/restart. Attempting automated login...');
+                        try {
+                            await runAutoLoginWithRetry('Server Startup');
+                        } finally {
+                            isAutoLoggingInProgress = false;
+                        }
+                    } else {
+                        console.log('✅ [Startup] Valid Zerodha session already active. Skipping startup login.');
+                    }
+                }, 10000);
+            }
         } catch (cronErr) {
             console.warn('Could not initialize Zerodha auto-login IST scheduler:', cronErr.message);
         }
