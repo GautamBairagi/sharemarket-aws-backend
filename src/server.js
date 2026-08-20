@@ -216,23 +216,27 @@ runMigrations()
             const kiteAutoLoginService = require('./services/KiteAutoLoginService');
 
             const runAutoLoginWithRetry = async () => {
-                console.log('⏰ [IST Scheduler] Triggering daily automated Zerodha login (8:30 AM IST)...');
+                console.log('⏰ [IST Scheduler] Triggering daily automated Zerodha login at 8:30 AM IST...');
                 for (let attempt = 1; attempt <= 3; attempt++) {
                     try {
-                        console.log(`[AutoLogin IST] Attempt ${attempt}/3...`);
+                        console.log(`[AutoLogin IST 8:30 AM] Attempt ${attempt}/3...`);
                         await kiteAutoLoginService.autoLogin();
-                        console.log('✅ [AutoLogin IST] Daily Zerodha auto-login successful!');
+                        console.log('✅ [AutoLogin IST 8:30 AM] Daily Zerodha auto-login successful!');
                         return;
                     } catch (err) {
-                        console.error(`❌ [AutoLogin IST] Auto-login attempt ${attempt} failed:`, err.message);
-                        if (attempt < 3) await new Promise(r => setTimeout(r, 15000));
+                        console.error(`❌ [AutoLogin IST 8:30 AM] Attempt ${attempt}/3 failed:`, err.message);
+                        if (attempt < 3) {
+                            console.log('⏳ Retrying Zerodha auto-login in 15 seconds...');
+                            await new Promise(r => setTimeout(r, 15000));
+                        }
                     }
                 }
             };
 
             let lastAutoLoginDate = '';
+            let isAutoLoggingInProgress = false;
 
-            const checkAndRunIstAutoLogin = () => {
+            const checkAndRunIstAutoLogin = async () => {
                 try {
                     const now = new Date();
                     const parts = new Intl.DateTimeFormat('en-US', {
@@ -252,44 +256,33 @@ runMigrations()
                         if (p.type === 'year') year = p.value;
                         if (p.type === 'month') month = p.value;
                         if (p.type === 'day') day = p.value;
-                        if (p.type === 'hour') hour = parseInt(p.value, 10);
+                        if (p.type === 'hour') hour = parseInt(p.value, 10) % 24;
                         if (p.type === 'minute') minute = parseInt(p.value, 10);
                     });
 
                     const currentDateStr = `${year}-${month}-${day}`;
                     const isTradingDay = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday);
 
-                    // Trigger at exactly 08:30 AM IST on Trading Days (Mon-Fri) once per day
-                    if (isTradingDay && hour === 8 && minute === 30 && lastAutoLoginDate !== currentDateStr) {
-                        lastAutoLoginDate = currentDateStr;
-                        console.log(`⏰ [IST AutoLogin Scheduler] 8:30 AM IST detected on ${weekday} (${currentDateStr}). Triggering Zerodha Auto-Login...`);
-                        runAutoLoginWithRetry();
+                    // Trigger ONLY at exactly 8:30 AM IST (hour === 8 && minute === 30) on Trading Days (Mon-Fri)
+                    if (isTradingDay && hour === 8 && minute === 30 && lastAutoLoginDate !== currentDateStr && !isAutoLoggingInProgress) {
+                        lastAutoLoginDate = currentDateStr; // Mark today done immediately to prevent re-trigger
+                        isAutoLoggingInProgress = true;
+                        console.log(`⏰ [IST AutoLogin Scheduler] 8:30 AM IST detected on ${weekday} (${currentDateStr}). Triggering Zerodha Auto-Login (3 attempts with 15s intervals)...`);
+                        try {
+                            await runAutoLoginWithRetry();
+                        } finally {
+                            isAutoLoggingInProgress = false;
+                        }
                     }
                 } catch (err) {
                     console.error('[IST Scheduler Error]:', err.message);
                 }
             };
 
-            // Check every 10 seconds (Guarantees 8:30 AM IST execution regardless of server OS timezone)
-            setInterval(checkAndRunIstAutoLogin, 10000);
+            // Check every 5 seconds to catch 8:30 AM IST immediately
+            setInterval(checkAndRunIstAutoLogin, 5000);
 
-            console.log('📅 Native IST Zerodha Auto-Login Scheduler initialized for 8:30 AM IST Mon-Fri.');
-
-            // On server startup: attempt auto-login if credentials present & not connected
-            if (process.env.ZERODHA_USER_ID && process.env.ZERODHA_PASSWORD && process.env.ZERODHA_TOTP_SECRET) {
-                setTimeout(async () => {
-                    const kiteService = require('./utils/kiteService');
-                    if (!kiteService.isAuthenticated()) {
-                        console.log('ℹ️ Zerodha not connected on startup. Attempting automated login...');
-                        try {
-                            await kiteAutoLoginService.autoLogin();
-                            console.log('✅ Automated startup login successful!');
-                        } catch (e) {
-                            console.warn('⚠️ Automated startup login skipped/failed:', e.message);
-                        }
-                    }
-                }, 10000);
-            }
+            console.log('📅 Native IST Zerodha Auto-Login Scheduler initialized for 8:30 AM IST sharp Mon-Fri (3 attempts x 15s retry).');
         } catch (cronErr) {
             console.warn('Could not initialize Zerodha auto-login IST scheduler:', cronErr.message);
         }

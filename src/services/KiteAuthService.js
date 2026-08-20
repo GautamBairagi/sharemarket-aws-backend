@@ -6,13 +6,13 @@ const crypto = require('crypto');
 const API_KEY = process.env.KITE_API_KEY;
 const API_SECRET = process.env.KITE_API_SECRET;
 
-// Server runs in IST (TZ=Asia/Kolkata), so new Date() gives IST directly
 function getIstDateStr(dateLike = new Date()) {
     if (!dateLike) return '';
     try {
-        return new Date(dateLike).toLocaleDateString('en-IN');
+        const d = new Date(dateLike);
+        return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d); // returns YYYY-MM-DD
     } catch (_) {
-        return new Date(dateLike).toDateString();
+        return new Date(dateLike).toISOString().substring(0, 10);
     }
 }
 
