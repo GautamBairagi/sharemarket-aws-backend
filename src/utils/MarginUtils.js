@@ -20,29 +20,39 @@ const MarginUtils = {
                 const upperSym = (trade.symbol || '').toUpperCase();
                 const baseScrip = this.getMcxBaseScrip(trade.symbol, brokerMargins);
 
-                // Priority 1: Scrip-specific Lot-wise HOLDING Margin (Fixed Amount or Exposure)
-                const scripConfig = brokerMargins[upperSym] || brokerMargins[baseScrip];
-                // FIX: Handle 0 correctly - don't use || for zero values
-                const holdingMarginValue = parseFloat(
-                    scripConfig?.HOLDING !== undefined ? scripConfig.HOLDING : scripConfig?.holding_exposure
-                );
+                // ✅ FIX: Check exposureType first - if TURNOVER, skip lot-wise config entirely
+                const mcxExposureType = clientConfig.mcxExposureType || 'per_lot';
+                const isTurnoverBased = mcxExposureType === 'per_turnover' || mcxExposureType === 'PER_TURNOVER_BASIS';
 
-                if (Number.isFinite(holdingMarginValue) && holdingMarginValue >= 0) {  // Allow 0!
-                    // If it's a fixed amount per lot (usually > 1000) or exposure divisor (usually 100)
-                    if (holdingMarginValue > 500) {
-                        // Fixed Amount per lot
-                        tradeMargin = holdingMarginValue * qtyNum;
-                    } else if (holdingMarginValue > 0) {
-                        // Exposure Divisor
-                        tradeMargin = turnover / holdingMarginValue;
-                    } else {
-                        // holdingMarginValue = 0, so margin = 0
-                        tradeMargin = 0;
-                    }
-                } else {
-                    // Priority 2: Global Exposure-based Calculation (HOLDING)
+                if (isTurnoverBased) {
+                    // TURNOVER-based: use global mcxHoldingMargin directly
                     const holdingExposure = parseFloat(clientConfig.mcxHoldingMargin || clientConfig.mcx_holding_exposure || 100);
                     tradeMargin = turnover / (holdingExposure || 1);
+                } else {
+                    // LOT-based: existing scrip-specific logic unchanged
+                    const scripConfig = brokerMargins[upperSym] || brokerMargins[baseScrip];
+                    // FIX: Handle 0 correctly - don't use || for zero values
+                    const holdingMarginValue = parseFloat(
+                        scripConfig?.HOLDING !== undefined ? scripConfig.HOLDING : scripConfig?.holding_exposure
+                    );
+
+                    if (Number.isFinite(holdingMarginValue) && holdingMarginValue >= 0) {  // Allow 0!
+                        // If it's a fixed amount per lot (usually > 1000) or exposure divisor (usually 100)
+                        if (holdingMarginValue > 500) {
+                            // Fixed Amount per lot
+                            tradeMargin = holdingMarginValue * qtyNum;
+                        } else if (holdingMarginValue > 0) {
+                            // Exposure Divisor
+                            tradeMargin = turnover / holdingMarginValue;
+                        } else {
+                            // holdingMarginValue = 0, so margin = 0
+                            tradeMargin = 0;
+                        }
+                    } else {
+                        // Priority 2: Global Exposure-based Calculation (HOLDING)
+                        const holdingExposure = parseFloat(clientConfig.mcxHoldingMargin || clientConfig.mcx_holding_exposure || 100);
+                        tradeMargin = turnover / (holdingExposure || 1);
+                    }
                 }
             } else if (mType === 'EQUITY') {
                 const holdingExposure = parseFloat(clientConfig.equityIntradayMargin || clientConfig.equityHoldingMargin || 500);

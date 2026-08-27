@@ -8,14 +8,14 @@ const { uploadFile, deleteFile } = require('../utils/imagekit');
 
 const getUsers = async (req, res) => {
     try {
-        const { role } = req.query;
+        const { role, adminId } = req.query;
         const currentUserId = req.user.id;
         const currentUserRole = req.user.role;
 
-        console.log(`[getUsers] User ${currentUserId} (${currentUserRole}) requesting users with role filter: ${role || 'all'}`);
+        console.log(`[getUsers] User ${currentUserId} (${currentUserRole}) requesting users with role filter: ${role || 'all'}, adminId: ${adminId || 'none'}`);
 
         // Try to get from cache first (safe: if fails, continues to DB query)
-        const cacheKey = `users_${currentUserId}_${role || 'all'}`;
+        const cacheKey = `users_${currentUserId}_${role || 'all'}_${adminId || 'all'}`;
         try {
             const cachedData = await getFromCache(cacheKey);
             if (cachedData) {
@@ -60,10 +60,27 @@ const getUsers = async (req, res) => {
         }
 
         if (currentUserRole === 'SUPERADMIN') {
-            // SUPERADMIN: See only users they directly created
-            console.log(`[getUsers] SUPERADMIN ${currentUserId} viewing their own direct users`);
-            query += ' AND u.parent_id = ?';
-            params.push(currentUserId);
+            if (role === 'BROKER' && adminId) {
+                if (adminId === 'all') {
+                    // SUPERADMIN viewing ALL brokers across all admins
+                    console.log(`[getUsers] SUPERADMIN ${currentUserId} viewing ALL brokers across all admins`);
+                } else if (adminId !== 'me' && adminId !== '') {
+                    // SUPERADMIN viewing brokers under a specific Admin
+                    console.log(`[getUsers] SUPERADMIN ${currentUserId} viewing brokers under Admin ID ${adminId}`);
+                    query += ' AND u.parent_id = ?';
+                    params.push(adminId);
+                } else {
+                    // adminId === 'me' or empty: SUPERADMIN viewing their own direct brokers
+                    console.log(`[getUsers] SUPERADMIN ${currentUserId} viewing their own direct brokers`);
+                    query += ' AND u.parent_id = ?';
+                    params.push(currentUserId);
+                }
+            } else {
+                // SUPERADMIN: See only users they directly created
+                console.log(`[getUsers] SUPERADMIN ${currentUserId} viewing their own direct users`);
+                query += ' AND u.parent_id = ?';
+                params.push(currentUserId);
+            }
         } else if (currentUserRole === 'ADMIN') {
             // ADMIN: See users they created OR users assigned to their brokers
             query += ' AND (u.parent_id = ? OR u.id IN (SELECT user_id FROM client_settings WHERE broker_id IN (SELECT id FROM users WHERE parent_id = ?)))';

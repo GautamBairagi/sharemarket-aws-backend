@@ -108,7 +108,9 @@ const getClientLiveM2M = async (req, res) => {
                 brokerQuery = "SELECT id, username, full_name, role FROM users WHERE role = 'BROKER' AND parent_id = ?";
                 brokerParams.push(userId);
             } else if (role === 'SUPERADMIN') {
-                brokerQuery = "SELECT id, username, full_name, role FROM users WHERE role IN ('BROKER', 'ADMIN')";
+                brokerQuery = `SELECT id, username, full_name, role FROM users 
+                    WHERE role = 'ADMIN' 
+                    OR (role = 'BROKER' AND (parent_id IS NULL OR parent_id NOT IN (SELECT id FROM users WHERE role = 'ADMIN')))`;
             }
             const [bRows] = await db.execute(brokerQuery, brokerParams);
             brokers = bRows;
@@ -412,8 +414,7 @@ const getClientLiveM2M = async (req, res) => {
 
             if (trade.status === 'CLOSED') {
                 const rawClosedPnl = parseFloat(trade.pnl || 0);
-                const netClosedPnl = (parseFloat(trade.pnl || 0) - parseFloat(trade.brokerage || 0) - parseFloat(trade.swap || 0));
-                stats.profitLoss[segment] += netClosedPnl;
+                stats.profitLoss[segment] += rawClosedPnl;
 
                 if (isBrokerList) {
                     if (trade.user_role === 'ADMIN' || trade.user_role === 'BROKER') {
@@ -560,18 +561,30 @@ const getClientLiveM2M = async (req, res) => {
                 trade.lot_size = lotSize;
                 const dynamicMargin = MarginUtils.calculateTotalRequiredHoldingMargin([trade], userConfig);
 
+                // ✅ FIX: Calculate marginUsed dynamically based on mcxExposureType
+                const mktType = (trade.market_type || '').toUpperCase();
+                let dynamicMarginUsed = parseFloat(trade.margin_used || 0); // default: DB value
+                if (mktType === 'MCX') {
+                    const mcxExpType = userConfig?.mcxExposureType || 'per_lot';
+                    const isTurnover = mcxExpType === 'per_turnover' || mcxExpType === 'PER_TURNOVER_BASIS' || mcxExpType === 'per_crore';
+                    if (isTurnover) {
+                        const intradayExp = parseFloat(userConfig?.mcxIntradayMargin || userConfig?.mcx_intraday_exposure || 500);
+                        dynamicMarginUsed = (entryPrice * qty * lotSize) / (intradayExp || 1);
+                    }
+                }
+
                 if (isBrokerList) {
                     if (trade.user_role === 'ADMIN' || trade.user_role === 'BROKER') {
                         const uId = trade.user_id;
                         if (brokerStatsMap[uId]) {
                             brokerStatsMap[uId].margin += dynamicMargin;
-                            brokerStatsMap[uId].marginUsed += parseFloat(trade.margin_used || 0);
+                            brokerStatsMap[uId].marginUsed += dynamicMarginUsed;
                         }
                         if (trade.user_role === 'BROKER') {
                             const parentId = userParentMap[uId];
                             if (parentId && brokerStatsMap[parentId]) {
                                 brokerStatsMap[parentId].margin += dynamicMargin;
-                                brokerStatsMap[parentId].marginUsed += parseFloat(trade.margin_used || 0);
+                                brokerStatsMap[parentId].marginUsed += dynamicMarginUsed;
                             }
                         }
                     } else {
@@ -580,11 +593,11 @@ const getClientLiveM2M = async (req, res) => {
                             const { brokerId, adminId } = parents;
                             if (brokerId && brokerStatsMap[brokerId]) {
                                 brokerStatsMap[brokerId].margin += dynamicMargin;
-                                brokerStatsMap[brokerId].marginUsed += parseFloat(trade.margin_used || 0);
+                                brokerStatsMap[brokerId].marginUsed += dynamicMarginUsed;
                             }
                             if (adminId && brokerStatsMap[adminId]) {
                                 brokerStatsMap[adminId].margin += dynamicMargin;
-                                brokerStatsMap[adminId].marginUsed += parseFloat(trade.margin_used || 0);
+                                brokerStatsMap[adminId].marginUsed += dynamicMarginUsed;
                             }
                         }
                     }
@@ -624,12 +637,12 @@ const getClientLiveM2M = async (req, res) => {
                         }
                         p.pnl += unrealizedPnl;
                         p.margin += dynamicMargin;
-                        p.marginUsed += parseFloat(trade.margin_used || 0);
+                        p.marginUsed += dynamicMarginUsed;
                         p.cmp = exitPrice;
                     }
 
                     clientMap[trade.user_id].margin += dynamicMargin;
-                    clientMap[trade.user_id].marginUsed += parseFloat(trade.margin_used || 0);
+                    clientMap[trade.user_id].marginUsed += dynamicMarginUsed;
                 }
             }
         });

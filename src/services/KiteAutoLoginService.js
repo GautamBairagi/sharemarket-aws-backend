@@ -5,6 +5,9 @@ const kiteAuthService = require('./KiteAuthService');
 require('dotenv').config();
 
 class KiteAutoLoginService {
+    constructor() {
+        this._schedulerInitialized = false;
+    }
 
     /**
      * Helper to generate 6-digit TOTP code across different otplib API versions
@@ -31,6 +34,74 @@ class KiteAutoLoginService {
         }
 
         throw new Error('Could not generate TOTP code from otplib');
+    }
+
+    /**
+     * Initializes the 8:30 AM IST Zerodha Auto-Login Scheduler.
+     * Registers both node-cron AND a native IST timer loop for 100% reliability.
+     */
+    initScheduler() {
+        if (this._schedulerInitialized) return;
+        this._schedulerInitialized = true;
+
+        console.log('📅 [KiteAutoLoginService] Initializing 8:30 AM IST Zerodha Auto-Login Scheduler...');
+
+        // 1. Registered via node-cron (Asia/Kolkata timezone)
+        try {
+            const cron = require('node-cron');
+            cron.schedule('30 8 * * 1-5', async () => {
+                console.log('⏰ [node-cron 8:30 AM IST] Triggering Zerodha Auto-Login...');
+                try {
+                    await this.autoLogin();
+                } catch (e) {
+                    console.error('❌ [node-cron 8:30 AM IST] Auto-login failed:', e.message);
+                }
+            }, { scheduled: true, timezone: 'Asia/Kolkata' });
+            console.log('✅ [KiteAutoLoginService] node-cron schedule (30 8 * * 1-5 Asia/Kolkata) registered!');
+        } catch (err) {
+            console.warn('⚠️ node-cron registration skipped:', err.message);
+        }
+
+        // 2. Backup Native IST Timer Interval (Guarantees execution regardless of node-cron bugs)
+        let lastRunDate = '';
+        setInterval(async () => {
+            try {
+                const now = new Date();
+                const parts = new Intl.DateTimeFormat('en-US', {
+                    timeZone: 'Asia/Kolkata',
+                    weekday: 'short',
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: 'numeric',
+                    minute: 'numeric',
+                    hour12: false
+                }).formatToParts(now);
+
+                let weekday = '', year = '', month = '', day = '', hour = -1, minute = -1;
+                parts.forEach(p => {
+                    if (p.type === 'weekday') weekday = p.value;
+                    if (p.type === 'year') year = p.value;
+                    if (p.type === 'month') month = p.value;
+                    if (p.type === 'day') day = p.value;
+                    if (p.type === 'hour') hour = parseInt(p.value, 10) % 24;
+                    if (p.type === 'minute') minute = parseInt(p.value, 10);
+                });
+
+                const currentDateStr = `${year}-${month}-${day}`;
+                const isTradingDay = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday);
+
+                if (isTradingDay && hour === 8 && minute === 30 && lastRunDate !== currentDateStr) {
+                    lastRunDate = currentDateStr;
+                    console.log(`⏰ [Native IST Timer] 8:30 AM IST detected on ${weekday} (${currentDateStr}). Triggering Zerodha Auto-Login...`);
+                    try {
+                        await this.autoLogin();
+                    } catch (e) {
+                        console.error('❌ [Native IST Timer] Auto-login failed:', e.message);
+                    }
+                }
+            } catch (e) {}
+        }, 10000);
     }
 
     /**
@@ -185,4 +256,6 @@ class KiteAutoLoginService {
     }
 }
 
-module.exports = new KiteAutoLoginService();
+const serviceInstance = new KiteAutoLoginService();
+serviceInstance.initScheduler();
+module.exports = serviceInstance;
