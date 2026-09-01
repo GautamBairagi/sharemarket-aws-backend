@@ -643,7 +643,21 @@ async function buildKiteDashboardPayload(userId) {
         matches.forEach(m => dynamicOptions.push(`MCX:${m.tradingsymbol}`));
     }
 
-    const allSymbols = Array.from(new Set([...nseStocks, ...nseIndices, ...mcxFutSymbols, ...nfoFutSymbols, ...dynamicOptions]));
+    // 4. Open Trades (always subscribe to all active trade symbols to ensure live prices are fetched/streamed)
+    const openTradesSymbols = [];
+    try {
+        const db = require('../config/db');
+        const [openTrades] = await db.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'OPEN' AND is_pending = 0");
+        openTrades.forEach(t => {
+            if (t.symbol) {
+                openTradesSymbols.push(t.symbol);
+            }
+        });
+    } catch (e) {
+        console.error('Error fetching open trades for dashboard subscription:', e.message);
+    }
+
+    const allSymbols = Array.from(new Set([...nseStocks, ...nseIndices, ...mcxFutSymbols, ...nfoFutSymbols, ...dynamicOptions, ...openTradesSymbols]));
 
     // Subscribe to everything
     const subList = allSymbols.map(sym => ({ symbol: sym, token: getTokenSync(sym) })).filter(i => i.token);

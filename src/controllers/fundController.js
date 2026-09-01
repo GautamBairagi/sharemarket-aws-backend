@@ -139,8 +139,8 @@ const getFunds = async (req, res) => {
         }
 
         if (userId) {
-            query += " AND u.username LIKE ?";
-            params.push(`%${userId}%`);
+            query += " AND (u.id = ? OR u.username LIKE ?)";
+            params.push(userId, `%${userId}%`);
         }
         if (amount) {
             query += " AND l.amount = ?";
@@ -164,6 +164,50 @@ const getFunds = async (req, res) => {
         query += " ORDER BY l.created_at DESC";
 
         const [rows] = await db.execute(query, params);
+
+        // Prepend Opening Balance record at the top of the list for the client
+        if (userId) {
+            try {
+                const [uRows] = await db.execute(
+                    'SELECT id, username, full_name, balance FROM users WHERE id = ? OR username = ?',
+                    [userId, userId]
+                );
+                if (uRows.length > 0) {
+                    const targetUser = uRows[0];
+                    const { getWeekBoundaries, getISTDate } = require('../services/WeeklySettlementService');
+                    const boundaries = getWeekBoundaries(getISTDate());
+                    
+                    const [settleRows] = await db.execute(
+                        'SELECT closing_balance, opening_balance FROM weekly_settlements WHERE user_id = ? ORDER BY week_end_date DESC LIMIT 1',
+                        [targetUser.id]
+                    );
+
+                    let openingBal = 0;
+                    if (settleRows.length > 0) {
+                        openingBal = parseFloat(settleRows[0].closing_balance != null ? settleRows[0].closing_balance : settleRows[0].opening_balance);
+                    } else {
+                        openingBal = parseFloat(targetUser.balance || 0);
+                    }
+
+                    const openingEntry = {
+                        id: `opening_${targetUser.id}_${boundaries.week_start}`,
+                        user_id: targetUser.id,
+                        username: targetUser.username,
+                        full_name: targetUser.full_name,
+                        amount: openingBal,
+                        type: 'OPENING_BALANCE',
+                        balance_after: openingBal,
+                        remarks: 'Opening Balance',
+                        notes: 'Opening Balance',
+                        created_at: `${boundaries.week_start} 00:00:00`
+                    };
+
+                    rows.unshift(openingEntry);
+                }
+            } catch (openErr) {
+                console.error('[getFunds] Error attaching opening balance:', openErr.message);
+            }
+        }
 
         // Save to cache with 2 min TTL
         try {

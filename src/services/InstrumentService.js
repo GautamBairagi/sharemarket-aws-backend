@@ -24,8 +24,20 @@ class InstrumentService {
         this.loadingPromise = (async () => {
             try {
                 if (!fs.existsSync(INSTRUMENTS_CACHE)) {
-                    console.warn('⚠️ Instruments cache file not found. Symbols will not map correctly!');
-                    return;
+                    console.warn('⚠️ Instruments cache file not found. Attempting auto-sync...');
+                    try {
+                        const repo = require('../repositories/KiteRepository');
+                        const latestSession = await repo.getLatestSession();
+                        if (latestSession && latestSession.user_id) {
+                            await this.syncInstruments(latestSession.user_id);
+                        } else {
+                            console.error('❌ Auto-sync failed: No active Zerodha session found in DB');
+                            return;
+                        }
+                    } catch (syncErr) {
+                        console.error('❌ Auto-sync failed during execution:', syncErr.message);
+                        return;
+                    }
                 }
 
                 console.log('📂 Loading instruments into memory...');

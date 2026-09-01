@@ -1,6 +1,6 @@
 require('dotenv').config({ path: require('path').resolve(__dirname, '..', '.env') });
 
-// Prevent server crash on unhandled network or rejection errors (e.g. during internet drop)
+// Prevent server crash on unhandled network or rejection errors (e.g. during internet drop) - Ticker active reload trigger
 process.on('unhandledRejection', (reason, promise) => {
     console.error('⚠️ [Global] Unhandled Rejection:', reason?.message || reason);
 });
@@ -81,6 +81,7 @@ const adminRoutes = require('./routes/adminRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const alertRoutes = require('./routes/alertRoutes');
 const marginRoutes = require('./routes/marginRoutes');
+const weeklySettlementRoutes = require('./routes/weeklySettlementRoutes');
 const { logIp } = require('./middleware/logger');
 
 // Middleware
@@ -118,6 +119,7 @@ app.use('/api/contracts', contractRoutes);
 app.use('/api/bank', bankRoutes);
 app.use('/api/new-client-bank', newClientBankRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/weekly-settlements', weeklySettlementRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/alerts', alertRoutes);
 app.use('/api/margin', marginRoutes);

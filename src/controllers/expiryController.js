@@ -15,7 +15,10 @@ const getExpiryRules = async (req, res) => {
                 comexSquareOffTime: '23:30',
                 allowExpiringScrip: 'No',
                 daysBeforeExpiry: '0',
-                mcxOptionsAwayPoints: {}
+                mcxOptionsAwayPoints: {},
+                weeklySettlementDay: 'Sunday',
+                weeklySettlementTime: '12:00',
+                weeklySettlementEnabled: 'Yes'
             });
         }
         const row = rows[0];
@@ -28,7 +31,10 @@ const getExpiryRules = async (req, res) => {
             comexSquareOffTime: row.comex_square_off_time,
             allowExpiringScrip: row.allow_expiring_scrip,
             daysBeforeExpiry: String(row.days_before_expiry),
-            mcxOptionsAwayPoints: row.away_points ? JSON.parse(row.away_points) : {}
+            mcxOptionsAwayPoints: row.away_points ? JSON.parse(row.away_points) : {},
+            weeklySettlementDay: row.weekly_settlement_day || 'Sunday',
+            weeklySettlementTime: row.weekly_settlement_time || '12:00',
+            weeklySettlementEnabled: row.weekly_settlement_enabled || 'Yes'
         });
     } catch (err) {
         console.error(err);
@@ -37,24 +43,36 @@ const getExpiryRules = async (req, res) => {
 };
 
 const updateExpiryRules = async (req, res) => {
-    const { autoSquareOff, nseSquareOffTime, mcxSquareOffTime, cryptoSquareOffTime, forexSquareOffTime, comexSquareOffTime, allowExpiringScrip, daysBeforeExpiry, mcxOptionsAwayPoints } = req.body;
+    const {
+        autoSquareOff, nseSquareOffTime, mcxSquareOffTime, cryptoSquareOffTime,
+        forexSquareOffTime, comexSquareOffTime, allowExpiringScrip, daysBeforeExpiry,
+        mcxOptionsAwayPoints, weeklySettlementDay, weeklySettlementTime, weeklySettlementEnabled
+    } = req.body;
     const userId = req.user.id;
 
     try {
-        console.log(`[ExpiryController] Updating rules for user ${userId}:`, { autoSquareOff, nseSquareOffTime, mcxSquareOffTime, cryptoSquareOffTime, forexSquareOffTime, comexSquareOffTime });
+        console.log(`[ExpiryController] Updating rules for user ${userId}:`, { autoSquareOff, nseSquareOffTime, mcxSquareOffTime, weeklySettlementDay, weeklySettlementTime });
         await db.execute(
-            `INSERT INTO expiry_rules (user_id, auto_square_off, square_off_time, mcx_square_off_time, crypto_square_off_time, forex_square_off_time, comex_square_off_time, allow_expiring_scrip, days_before_expiry, away_points)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `INSERT INTO expiry_rules (
+                user_id, auto_square_off, square_off_time, mcx_square_off_time,
+                crypto_square_off_time, forex_square_off_time, comex_square_off_time,
+                allow_expiring_scrip, days_before_expiry, away_points,
+                weekly_settlement_day, weekly_settlement_time, weekly_settlement_enabled
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
-                auto_square_off      = VALUES(auto_square_off),
-                square_off_time      = VALUES(square_off_time),
-                mcx_square_off_time  = VALUES(mcx_square_off_time),
-                crypto_square_off_time = VALUES(crypto_square_off_time),
-                forex_square_off_time  = VALUES(forex_square_off_time),
-                comex_square_off_time  = VALUES(comex_square_off_time),
-                allow_expiring_scrip = VALUES(allow_expiring_scrip),
-                days_before_expiry   = VALUES(days_before_expiry),
-                away_points          = VALUES(away_points)`,
+                auto_square_off           = VALUES(auto_square_off),
+                square_off_time           = VALUES(square_off_time),
+                mcx_square_off_time       = VALUES(mcx_square_off_time),
+                crypto_square_off_time    = VALUES(crypto_square_off_time),
+                forex_square_off_time     = VALUES(forex_square_off_time),
+                comex_square_off_time     = VALUES(comex_square_off_time),
+                allow_expiring_scrip      = VALUES(allow_expiring_scrip),
+                days_before_expiry        = VALUES(days_before_expiry),
+                away_points               = VALUES(away_points),
+                weekly_settlement_day     = VALUES(weekly_settlement_day),
+                weekly_settlement_time    = VALUES(weekly_settlement_time),
+                weekly_settlement_enabled = VALUES(weekly_settlement_enabled)`,
             [
                 userId,
                 autoSquareOff || 'No',
@@ -65,10 +83,13 @@ const updateExpiryRules = async (req, res) => {
                 comexSquareOffTime || '23:30',
                 allowExpiringScrip || 'No',
                 parseInt(daysBeforeExpiry) || 0,
-                mcxOptionsAwayPoints ? JSON.stringify(mcxOptionsAwayPoints) : null
+                mcxOptionsAwayPoints ? JSON.stringify(mcxOptionsAwayPoints) : null,
+                weeklySettlementDay || 'Sunday',
+                weeklySettlementTime || '12:00',
+                weeklySettlementEnabled || 'Yes'
             ]
         );
-        res.json({ message: 'Expiry rules updated successfully' });
+        res.json({ message: 'Expiry rules and Weekly Settlement settings updated successfully' });
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error' });
@@ -76,3 +97,4 @@ const updateExpiryRules = async (req, res) => {
 };
 
 module.exports = { getExpiryRules, updateExpiryRules };
+

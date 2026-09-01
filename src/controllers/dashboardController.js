@@ -2,6 +2,7 @@ const db = require('../config/db');
 const marketDataService = require('../services/MarketDataService');
 const { getMcxBaseScrip } = require('../utils/symbolHelper');
 const MarginUtils = require('../utils/MarginUtils');
+const { getSegmentExposure } = require('../utils/segmentHelper');
 
 /**
  * Live Market Prices (Snapshot)
@@ -23,7 +24,7 @@ const syncPricesForTrades = async (trades) => {
     try {
         const openSymbols = new Set();
         trades.forEach(t => {
-            if (t.status === 'OPEN' && t.symbol) {
+            if ((t.status === 'OPEN' || t.status === 'HOLD') && t.symbol) {
                 openSymbols.add(t.symbol.toUpperCase());
             }
         });
@@ -68,6 +69,7 @@ const syncPricesForTrades = async (trades) => {
         console.error('syncPricesForTrades error:', err);
     }
 };
+
 
 /**
  * Superadmin Dashboard - Dynamic Implementation
@@ -174,15 +176,15 @@ const getClientLiveM2M = async (req, res) => {
         });
 
         const MCX_LOT_SIZES = {
-            'GOLD': 100, 'GOLDM': 10, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
-            'SILVER': 30, 'SILVERM': 5, 'SILVERMIC': 1,
-            'CRUDEOIL': 100, 'CRUDEOILM': 10,
-            'NATURALGAS': 1250, 'NATURALGASM': 125, 'NATGASMINI': 250,
-            'COPPER': 2500, 'COPPERM': 250,
-            'ZINC': 5000, 'ZINCMINI': 1000,
-            'LEAD': 5000, 'LEADMINI': 1000,
-            'NICKEL': 1500, 'NICKELMINI': 100,
-            'ALUMINIUM': 5000, 'ALUMINI': 1000, 'ALUMINIUMM': 1000,
+            'GOLD': 100, 'GOLDM': 10, 'MGOLD': 10, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
+            'SILVER': 30, 'SILVERM': 5, 'MSILVER': 5, 'SILVERMIC': 1,
+            'CRUDEOIL': 100, 'CRUDEOILM': 10, 'MCRUDEOIL': 10,
+            'NATURALGAS': 1250, 'NATURALGASM': 125, 'MNATURALGAS': 125, 'NATGASMINI': 250,
+            'COPPER': 2500, 'COPPERM': 250, 'MCOPPER': 250,
+            'ZINC': 5000, 'ZINCMINI': 1000, 'MZINC': 1000,
+            'LEAD': 5000, 'LEADMINI': 1000, 'MLEAD': 1000,
+            'NICKEL': 1500, 'NICKELMINI': 100, 'MNICKEL': 100,
+            'ALUMINIUM': 5000, 'ALUMINI': 1000, 'ALUMINIUMM': 1000, 'MALUMINIUM': 1000,
             'MENTHAOIL': 360, 'COTTON': 25, 'BULLDEX': 1,
         };
 
@@ -191,7 +193,9 @@ const getClientLiveM2M = async (req, res) => {
             const mType = (marketType || 'MCX').toUpperCase();
 
             // 1. NSE/Equity/Options/NFO generally use point-to-point (multiplier 1)
-            if (mType === 'EQUITY' || mType === 'NSE' || mType === 'NFO' || mType === 'OPTIONS') {
+            const isMcxSymbol = mType === 'MCX' || sym.startsWith('MCX:') || 
+                ['GOLD', 'SILVER', 'CRUDEOIL', 'NATURALGAS', 'COPPER', 'ZINC', 'NICKEL', 'LEAD', 'ALUMINIUM'].some(k => sym.includes(k));
+            if (!isMcxSymbol && (mType === 'EQUITY' || mType === 'NSE' || mType === 'NFO' || mType === 'OPTIONS')) {
                 return 1;
             }
 
@@ -398,23 +402,36 @@ const getClientLiveM2M = async (req, res) => {
             let totalUnits = qty * lotSize;
 
             // Fallback to actual_qty only for non-MCX if it exists
-            if (mType !== 'MCX' && trade.actual_qty && parseFloat(trade.actual_qty) > 0) {
+            const isMcxTrade = mType === 'MCX' || (trade.symbol || '').toUpperCase().includes('MCX') || 
+                ['GOLD', 'SILVER', 'CRUDEOIL', 'NATURALGAS', 'COPPER', 'ZINC', 'NICKEL', 'LEAD', 'ALUMINIUM'].some(k => (trade.symbol || '').toUpperCase().includes(k));
+            if (!isMcxTrade && trade.actual_qty && parseFloat(trade.actual_qty) > 0) {
                 totalUnits = parseFloat(trade.actual_qty);
             }
 
             const tradeValue = entryPrice * totalUnits;
 
-            if (isBuy) stats.buyTurnover[segment] += tradeValue;
-            else stats.sellTurnover[segment] += tradeValue;
-            stats.totalTurnover[segment] += tradeValue;
+            // Scope Dashboard Turnover and Brokerage stats to Current Active Week (Resets weekly)
+            const { getWeekBoundaries } = require('../services/WeeklySettlementService');
+            const { week_start } = getWeekBoundaries(new Date());
+            const entryDateStr = trade.entry_time ? new Date(trade.entry_time).toISOString().slice(0, 10) : '';
+            const isTradeInCurrentWeek = entryDateStr >= week_start;
 
-            stats.brokerage[segment] += parseFloat(trade.brokerage || 0);
+            if (isTradeInCurrentWeek) {
+                if (isBuy) stats.buyTurnover[segment] += tradeValue;
+                else stats.sellTurnover[segment] += tradeValue;
+                stats.totalTurnover[segment] += tradeValue;
 
-
+                // Carried forward / HOLD trades do not count duplicate brokerage in the new week
+                if (!trade.is_carried_forward && trade.status !== 'HOLD') {
+                    stats.brokerage[segment] += parseFloat(trade.brokerage || 0);
+                }
+            }
 
             if (trade.status === 'CLOSED') {
                 const rawClosedPnl = parseFloat(trade.pnl || 0);
-                stats.profitLoss[segment] += rawClosedPnl;
+                if (isTradeInCurrentWeek) {
+                    stats.profitLoss[segment] += rawClosedPnl;
+                }
 
                 if (isBrokerList) {
                     if (trade.user_role === 'ADMIN' || trade.user_role === 'BROKER') {
@@ -451,24 +468,24 @@ const getClientLiveM2M = async (req, res) => {
                 }
             }
 
-            if (trade.status === 'OPEN' && !trade.is_pending) {
+            if ((trade.status === 'OPEN' || trade.status === 'HOLD') && !trade.is_pending) {
                 stats.activeUsers[segment].add(trade.user_id);
                 if (isBuy) stats.activeBuy[segment] += 1;
                 else stats.activeSell[segment] += 1;
 
-                const prefix = PREFIX_MAP[mType] || mType;
-                const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
-
                 // 🎯 Try multiple symbol patterns to find the live price in the ticker
+                const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
+                const PREFIX_MAP = { MCX: 'MCX', NSE: 'NSE', NFO: 'NFO', EQUITY: 'NSE', OPTIONS: 'NFO', NIFTY: 'NFO' };
+                const prefix = PREFIX_MAP[mType] || mType;
                 const searchPatterns = [
-                    trade.symbol,                                      // 1. Raw symbol (e.g. "NFO:NIFTY26MAYFUT")
-                    `${prefix}:${cleanSymbol}`,                        // 2. Mapped prefix + clean symbol (e.g. "NFO:NIFTY26MAYFUT")
-                    cleanSymbol,                                       // 3. Just clean symbol (e.g. "NIFTY26MAYFUT")
-                    cleanSymbol.replace(/FUT$/i, ''),                  // 4. Normalized (e.g. "NIFTY26MAY")
-                    `${prefix}:${cleanSymbol.replace(/FUT$/i, '')}`,    // 5. Prefixed Normalized (e.g. "NFO:NIFTY26MAY")
-                    `NSE:${cleanSymbol}`,                              // 6. Force NSE (for EQUITY)
-                    `NFO:${cleanSymbol}`,                              // 7. Force NFO (for Futures)
-                    `MCX:${cleanSymbol}`                               // 8. Force MCX
+                    trade.symbol,
+                    `${prefix}:${cleanSymbol}`,
+                    cleanSymbol,
+                    cleanSymbol.replace(/FUT$/i, ''),
+                    `${prefix}:${cleanSymbol.replace(/FUT$/i, '')}`,
+                    `NSE:${cleanSymbol}`,
+                    `NFO:${cleanSymbol}`,
+                    `MCX:${cleanSymbol}`
                 ];
 
                 let liveData = null;
@@ -477,12 +494,11 @@ const getClientLiveM2M = async (req, res) => {
                     if (liveData) break;
                 }
 
-                // 🔍 Fuzzy match fallback: if exact lookup fails, try matching by base symbol prefix in cache
+                // 🔍 Fuzzy match fallback by base symbol prefix
                 if (!liveData) {
-                    const baseSym = cleanSymbol.toUpperCase().replace(/\d+.*/, ''); // E.g., get "GOLD" from "GOLD26JUNFUT" or "GOLD"
-                    if (baseSym) {
+                    const baseSym = cleanSymbol.toUpperCase().replace(/\d+.*/, '');
+                    if (baseSym && baseSym.length >= 3) {
                         const allPrices = marketDataService.prices;
-                        // Try matching with same prefix first (e.g. MCX to MCX)
                         for (const key of Object.keys(allPrices)) {
                             const cleanKey = key.includes(':') ? key.split(':')[1] : key;
                             const keyPrefix = key.includes(':') ? key.split(':')[0] : '';
@@ -491,7 +507,6 @@ const getClientLiveM2M = async (req, res) => {
                                 break;
                             }
                         }
-                        // If still not found, try matching any available prefix (e.g. COMMODITY:GOLD as fallback for MCX)
                         if (!liveData) {
                             for (const key of Object.keys(allPrices)) {
                                 const cleanKey = key.includes(':') ? key.split(':')[1] : key;
@@ -504,16 +519,10 @@ const getClientLiveM2M = async (req, res) => {
                     }
                 }
 
-                // Use BID for BUY trades (exit by selling) and ASK for SELL trades (exit by buying)
+                // Use BID for BUY trades (exit by selling), ASK for SELL trades
                 const exitPrice = isBuy
                     ? (liveData?.bid || liveData?.ltp || entryPrice)
                     : (liveData?.ask || liveData?.ltp || entryPrice);
-
-                // Diagnostic Log
-                if (mType === 'MCX' || trade.symbol.includes('GOLD')) {
-                    const source = liveData ? 'LIVE' : 'FALLBACK';
-                    console.log(`📊 [Realtime P/L] ${trade.symbol} | mType: ${mType} | Exit: ${exitPrice} (${source})`);
-                }
 
                 let unrealizedPnl = 0;
                 const commodityLotService = require('../services/CommodityLotService');
@@ -525,6 +534,19 @@ const getClientLiveM2M = async (req, res) => {
                         ? (exitPrice - entryPrice) * totalUnits
                         : (entryPrice - exitPrice) * totalUnits;
                 }
+
+                // ✅ FIX: Calculate marginUsed dynamically using segment-aware config
+                const mktType = (trade.market_type || '').toUpperCase();
+                let dynamicMarginUsed = parseFloat(trade.margin_used || 0); // default: DB value
+                try {
+                    const segExp = getSegmentExposure(trade.symbol, mktType, userConfig);
+                    if (segExp.isTurnover && segExp.intradayExposure > 0) {
+                        const isMcxTrade = mktType === 'MCX' || (trade.symbol || '').toUpperCase().includes('MCX') || 
+                            ['GOLD', 'SILVER', 'CRUDEOIL', 'NATURALGAS', 'COPPER', 'ZINC', 'NICKEL', 'LEAD', 'ALUMINIUM'].some(k => (trade.symbol || '').toUpperCase().includes(k));
+                        const tradeTurnover = entryPrice * qty * (isMcxTrade ? lotSize : 1);
+                        dynamicMarginUsed = tradeTurnover / segExp.intradayExposure;
+                    }
+                } catch (e) { /* keep DB value on error */ }
 
                 if (isBrokerList) {
                     if (trade.user_role === 'ADMIN' || trade.user_role === 'BROKER') {
@@ -560,18 +582,6 @@ const getClientLiveM2M = async (req, res) => {
                 const MarginUtils = require('../utils/MarginUtils');
                 trade.lot_size = lotSize;
                 const dynamicMargin = MarginUtils.calculateTotalRequiredHoldingMargin([trade], userConfig);
-
-                // ✅ FIX: Calculate marginUsed dynamically based on mcxExposureType
-                const mktType = (trade.market_type || '').toUpperCase();
-                let dynamicMarginUsed = parseFloat(trade.margin_used || 0); // default: DB value
-                if (mktType === 'MCX') {
-                    const mcxExpType = userConfig?.mcxExposureType || 'per_lot';
-                    const isTurnover = mcxExpType === 'per_turnover' || mcxExpType === 'PER_TURNOVER_BASIS' || mcxExpType === 'per_crore';
-                    if (isTurnover) {
-                        const intradayExp = parseFloat(userConfig?.mcxIntradayMargin || userConfig?.mcx_intraday_exposure || 500);
-                        dynamicMarginUsed = (entryPrice * qty * lotSize) / (intradayExp || 1);
-                    }
-                }
 
                 if (isBrokerList) {
                     if (trade.user_role === 'ADMIN' || trade.user_role === 'BROKER') {
@@ -911,7 +921,7 @@ module.exports = {
                         u.username
                  FROM trades t
                  JOIN users u ON t.user_id = u.id
-                 WHERE t.status = 'OPEN' AND t.user_id IN (${traderIds.join(',')})`,
+                 WHERE t.status IN ('OPEN', 'HOLD') AND t.user_id IN (${traderIds.join(',')})`,
                 []
             );
 

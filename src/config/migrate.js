@@ -248,17 +248,29 @@ const runMigrations = async () => {
     await addColumn('trades', 'trade_type', "VARCHAR(50) DEFAULT 'INTRADAY' AFTER created_by");
     await addColumn('trades', 'margin_type', "VARCHAR(50) DEFAULT 'PER_LOT_BASIS' AFTER trade_type");
     await addColumn('trades', 'close_ip', "VARCHAR(45) DEFAULT NULL");
+    
+    // Add carry forward & settlement tracking columns to trades
+    try { await db.execute("ALTER TABLE trades MODIFY COLUMN status ENUM('OPEN','CLOSED','HOLD','SETTLED','CANCELLED','DELETED') NOT NULL DEFAULT 'OPEN'"); } catch (_) { }
+    await addColumn('trades', 'is_carried_forward', 'TINYINT(1) DEFAULT 0');
+    await addColumn('trades', 'carry_forward_from_week', 'VARCHAR(30) DEFAULT NULL');
+    await addColumn('trades', 'carry_forward_to_week', 'VARCHAR(30) DEFAULT NULL');
+    await addColumn('trades', 'settlement_id', 'INT DEFAULT NULL');
+    await addColumn('trades', 'settlement_price', 'DECIMAL(18,4) DEFAULT NULL');
+    await addColumn('trades', 'settlement_time', 'TIMESTAMP NULL DEFAULT NULL');
+    await addIndex('trades', 'idx_trades_settlement', 'settlement_id');
+    await addIndex('trades', 'idx_trades_cf', 'is_carried_forward');
+
     await addColumn('scrip_data', 'market_type', "ENUM('MCX','NSE','NFO','EQUITY','COMEX','FOREX','CRYPTO','COMMODITY') DEFAULT 'MCX' AFTER margin_req");
     await addColumn('scrip_data', 'expiry_date', "DATE DEFAULT NULL AFTER market_type");
 
-    // ─── 8. FINANCIALS ─────────────────────────────────────────────────────────
+    // ─── 8. FINANCIALS & WEEKLY SETTLEMENTS ────────────────────────────────────
 
     await db.execute(`
         CREATE TABLE IF NOT EXISTS ledger (
             id            INT AUTO_INCREMENT PRIMARY KEY,
             user_id       INT NOT NULL,
             amount        DECIMAL(18,4) NOT NULL,
-            type          ENUM('DEPOSIT','WITHDRAW','TRADE_PNL','BROKERAGE','SWAP') NOT NULL,
+            type          ENUM('DEPOSIT','WITHDRAW','TRADE_PNL','BROKERAGE','SWAP','WEEKLY_SETTLEMENT','OPENING_BALANCE') NOT NULL,
             balance_after DECIMAL(18,4) NOT NULL,
             remarks       TEXT DEFAULT NULL,
             created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -277,6 +289,35 @@ const runMigrations = async () => {
             created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE KEY uq_user_week (user_id, week_end),
             CONSTRAINT fk_weekly_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    await db.execute(`
+        CREATE TABLE IF NOT EXISTS weekly_settlements (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            week_start_date DATE NOT NULL,
+            week_end_date DATE NOT NULL,
+            opening_balance DECIMAL(18,4) NOT NULL DEFAULT 0,
+            realized_pnl DECIMAL(18,4) NOT NULL DEFAULT 0,
+            brokerage DECIMAL(18,4) NOT NULL DEFAULT 0,
+            charges DECIMAL(18,4) NOT NULL DEFAULT 0,
+            total_deposit DECIMAL(18,4) NOT NULL DEFAULT 0,
+            total_withdrawal DECIMAL(18,4) NOT NULL DEFAULT 0,
+            net_week_result DECIMAL(18,4) NOT NULL DEFAULT 0,
+            closing_balance DECIMAL(18,4) NOT NULL DEFAULT 0,
+            carried_forward_trades_count INT NOT NULL DEFAULT 0,
+            settled_trades_count INT NOT NULL DEFAULT 0,
+            settlement_status ENUM('PENDING', 'COMPLETED', 'FAILED') NOT NULL DEFAULT 'COMPLETED',
+            settled_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+            settled_by_user_id INT DEFAULT NULL,
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_user_week_settlement (user_id, week_start_date, week_end_date),
+            KEY idx_week_dates (week_start_date, week_end_date),
+            KEY idx_settlement_status (settlement_status),
+            CONSTRAINT fk_ws_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
@@ -489,6 +530,11 @@ const runMigrations = async () => {
 
     // Add contract_mode column
     await addColumn('expiry_rules', 'contract_mode', "VARCHAR(20) DEFAULT 'MANUAL'");
+    
+    // Add Weekly Settlement Configuration columns (Configurable by SuperAdmin)
+    await addColumn('expiry_rules', 'weekly_settlement_day', "VARCHAR(50) DEFAULT 'Sunday'");
+    await addColumn('expiry_rules', 'weekly_settlement_time', "VARCHAR(50) DEFAULT '12:00'");
+    await addColumn('expiry_rules', 'weekly_settlement_enabled', "VARCHAR(10) DEFAULT 'Yes'");
 
     // Add unique constraint if not already there
     try { await db.execute('ALTER TABLE expiry_rules ADD UNIQUE KEY uq_user_expiry (user_id)'); } catch (_) { }

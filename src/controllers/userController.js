@@ -8,14 +8,23 @@ const { uploadFile, deleteFile } = require('../utils/imagekit');
 
 const getUsers = async (req, res) => {
     try {
-        const { role, adminId } = req.query;
+        const { role, adminId, fromDate, toDate } = req.query;
         const currentUserId = req.user.id;
         const currentUserRole = req.user.role;
 
-        console.log(`[getUsers] User ${currentUserId} (${currentUserRole}) requesting users with role filter: ${role || 'all'}, adminId: ${adminId || 'none'}`);
+        console.log(`[getUsers] User ${currentUserId} (${currentUserRole}) requesting users with role filter: ${role || 'all'}, adminId: ${adminId || 'none'}, fromDate: ${fromDate || 'none'}, toDate: ${toDate || 'none'}`);
+
+        // Build date filter for closed trades calculation
+        let tradeDateFilter = '';
+        if (fromDate && /^\d{4}-\d{2}-\d{2}/.test(fromDate)) {
+            tradeDateFilter += ` AND COALESCE(exit_time, entry_time, created_at) >= '${fromDate} 00:00:00'`;
+        }
+        if (toDate && /^\d{4}-\d{2}-\d{2}/.test(toDate)) {
+            tradeDateFilter += ` AND COALESCE(exit_time, entry_time, created_at) <= '${toDate} 23:59:59'`;
+        }
 
         // Try to get from cache first (safe: if fails, continues to DB query)
-        const cacheKey = `users_${currentUserId}_${role || 'all'}_${adminId || 'all'}`;
+        const cacheKey = `users_${currentUserId}_${role || 'all'}_${adminId || 'all'}_${fromDate || 'all'}_${toDate || 'all'}`;
         try {
             const cachedData = await getFromCache(cacheKey);
             if (cachedData) {
@@ -33,10 +42,10 @@ const getUsers = async (req, res) => {
                 u.balance as ledger_balance,
                 u.credit_limit,
                 IFNULL(ud.kyc_status, 'PENDING') as kycStatus,
-                IFNULL((SELECT SUM(pnl) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as gross_pl,
-                IFNULL((SELECT SUM(brokerage) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as brokerage,
-                IFNULL((SELECT SUM(swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as swap_charges,
-                IFNULL((SELECT SUM(pnl - brokerage - swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as net_pl,
+                IFNULL((SELECT SUM(pnl) FROM trades WHERE user_id = u.id AND status = 'CLOSED'${tradeDateFilter}), 0.00) as gross_pl,
+                IFNULL((SELECT SUM(brokerage) FROM trades WHERE user_id = u.id AND status = 'CLOSED'${tradeDateFilter}), 0.00) as brokerage,
+                IFNULL((SELECT SUM(swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'${tradeDateFilter}), 0.00) as swap_charges,
+                IFNULL((SELECT SUM(pnl - brokerage - swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'${tradeDateFilter}), 0.00) as net_pl,
                 (SELECT COUNT(*) FROM trades WHERE user_id = u.id AND status = 'OPEN') as active_trades_count,
                 cs.config_json,
                 cs.broker_id
@@ -119,11 +128,20 @@ const getUserProfile = async (req, res) => {
         const [userRows] = await db.execute(`
             SELECT 
                 u.*,
+                p.username as parent_username,
+                p.full_name as parent_name,
+                p.role as parent_role,
+                b.id as assigned_broker_id,
+                b.username as assigned_broker_username,
+                b.full_name as assigned_broker_name,
                 IFNULL((SELECT SUM(pnl) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as gross_pl,
                 IFNULL((SELECT SUM(brokerage) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as brokerage,
                 IFNULL((SELECT SUM(swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as swap_charges,
                 IFNULL((SELECT SUM(pnl - brokerage - swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as net_pl
             FROM users u 
+            LEFT JOIN users p ON u.parent_id = p.id
+            LEFT JOIN client_settings cs ON u.id = cs.user_id
+            LEFT JOIN users b ON cs.broker_id = b.id
             WHERE u.id = ?
         `, [req.params.id]);
         if (userRows.length === 0) return res.status(404).json({ message: 'User not found' });
@@ -136,6 +154,30 @@ const getUserProfile = async (req, res) => {
         const settings = settingsRows[0] || {};
         if (settings.config_json) {
             try { settings.config = JSON.parse(settings.config_json); } catch (e) { settings.config = {}; }
+        }
+
+        const profile = userRows[0];
+        // If assigned_broker_username is not populated via cs.broker_id, try config.broker or config.masterBroker
+        if (!profile.assigned_broker_username && settings.config) {
+            const rawBroker = settings.config.broker || settings.config.masterBroker;
+            if (rawBroker) {
+                const brokerIdMatch = String(rawBroker).match(/^(\d+)/);
+                if (brokerIdMatch) {
+                    const [bRows] = await db.execute('SELECT id, username, full_name FROM users WHERE id = ?', [brokerIdMatch[1]]);
+                    if (bRows.length > 0) {
+                        profile.assigned_broker_id = bRows[0].id;
+                        profile.assigned_broker_username = bRows[0].username;
+                        profile.assigned_broker_name = bRows[0].full_name;
+                    }
+                } else {
+                    const [bRows] = await db.execute('SELECT id, username, full_name FROM users WHERE username = ? OR full_name = ?', [rawBroker, rawBroker]);
+                    if (bRows.length > 0) {
+                        profile.assigned_broker_id = bRows[0].id;
+                        profile.assigned_broker_username = bRows[0].username;
+                        profile.assigned_broker_name = bRows[0].full_name;
+                    }
+                }
+            }
         }
 
         const brokerShares = brokerSharesRows[0] || {};
@@ -901,9 +943,24 @@ const getWeeklyBalance = async (req, res) => {
         const userId = req.params.id;
         const { getWeekBoundaries, getISTDate } = require('../services/WeeklySettlementService');
         const boundaries = getWeekBoundaries(getISTDate());
-        const { week_start, week_end } = boundaries;
+        // 1. First check weekly_settlements table for latest completed settlement
+        const [settlementRows] = await db.execute(
+            'SELECT * FROM weekly_settlements WHERE user_id = ? AND settlement_status = "COMPLETED" ORDER BY week_end_date DESC LIMIT 1',
+            [userId]
+        );
 
-        // Fetch the record for the current week (ending on current week_end)
+        if (settlementRows.length > 0) {
+            const s = settlementRows[0];
+            return res.json({
+                user_id: parseInt(userId),
+                week_start: s.week_start_date,
+                week_end: s.week_end_date,
+                opening_balance: parseFloat(s.opening_balance),
+                closing_balance: parseFloat(s.closing_balance)
+            });
+        }
+
+        // 2. Fetch the record for the current week from weekly_balances
         const [rows] = await db.execute(
             'SELECT * FROM weekly_balances WHERE user_id = ? AND week_end = ?',
             [userId, week_end]

@@ -9,11 +9,20 @@ const MarginUtils = {
         for (const trade of trades) {
             const qtyNum = parseFloat(trade.qty || 0);
             const entryPrice = parseFloat(trade.entry_price || 0);
-            const lotSize = parseFloat(trade.lot_size || trade.lot_size_at_entry || trade.multiplier || 1);
-            const turnover = entryPrice * qtyNum * lotSize;
             let tradeMargin = 0;
 
-            const mType = (trade.market_type || '').toUpperCase();
+            let mType = (trade.market_type || '').toUpperCase();
+
+            // ✅ Normalize market_type aliases so all branches match correctly
+            if (mType === 'NSE' || mType === 'NFO') mType = 'EQUITY';
+            if (mType === 'NIFTY') mType = 'OPTIONS';
+
+            const isMcxSymbol = (trade.symbol || '').toUpperCase().startsWith('MCX:') ||
+                                ['GOLD', 'SILVER', 'CRUDEOIL', 'NATURALGAS', 'COPPER', 'ZINC', 'NICKEL', 'LEAD', 'ALUMINIUM'].some(k => (trade.symbol || '').toUpperCase().includes(k));
+            const isNseNfo = !isMcxSymbol && (['NSE', 'NFO', 'EQUITY', 'OPTIONS'].includes(mType) || ['NSE', 'NFO', 'EQUITY', 'OPTIONS'].includes((trade.market_type || '').toUpperCase()));
+            const lotSize = isNseNfo ? 1 : parseFloat(trade.lot_size || trade.lot_size_at_entry || trade.multiplier || 1);
+            const turnover = entryPrice * qtyNum * lotSize;
+
 
             if (mType === 'MCX') {
                 const brokerMargins = clientConfig.mcxLotMargins || {};
@@ -55,11 +64,19 @@ const MarginUtils = {
                     }
                 }
             } else if (mType === 'EQUITY') {
-                const holdingExposure = parseFloat(clientConfig.equityIntradayMargin || clientConfig.equityHoldingMargin || 500);
+                // ✅ Use equityHoldingMargin (not intraday) for holding margin calculation
+                const holdingExposure = parseFloat(clientConfig.equityHoldingMargin || clientConfig.equity_holding_exposure || clientConfig.equityIntradayMargin || 100);
                 tradeMargin = turnover / (holdingExposure || 1);
             } else if (mType === 'OPTIONS') {
-                // Options typically use a divisor of 1 or a small value
-                tradeMargin = turnover / 1;
+                // ✅ Use segment-aware holding exposure for options (Index vs Equity vs MCX)
+                try {
+                    const { getSegmentExposure } = require('./segmentHelper');
+                    const segExp = getSegmentExposure(trade.symbol, mType, clientConfig);
+                    const holdingExposure = segExp.holdingExposure || 2;
+                    tradeMargin = turnover / (holdingExposure || 1);
+                } catch (e) {
+                    tradeMargin = turnover / 2; // fallback if helper fails
+                }
             } else if (mType === 'COMEX' || mType === 'FOREX' || mType === 'CRYPTO' || mType === 'COMMODITY') {
                 let segConfig = {};
                 if (mType === 'COMMODITY' || mType === 'COMEX') {

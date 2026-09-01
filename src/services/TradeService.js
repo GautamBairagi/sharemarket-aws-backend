@@ -106,7 +106,7 @@ class TradeService {
 
             if (tradeRows.length === 0) throw new Error('Trade not found');
             const trade = tradeRows[0];
-            if (trade.status !== 'OPEN') throw new Error('Trade is already closed');
+            if (trade.status !== 'OPEN' && trade.status !== 'HOLD') throw new Error('Trade is already closed');
 
             const clientConfig = JSON.parse(trade.config_json || '{}');
             const marginToRelease = parseFloat(trade.margin_used || 0);

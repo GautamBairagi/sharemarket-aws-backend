@@ -56,12 +56,12 @@ class CommodityLotService {
         const info = this.getLotInfo(symbol);
         if (info) {
             const cat = (info.category || '').toUpperCase();
-            if (cat === 'COMMODITY' || cat === 'FOREX' || cat === 'CRYPTO') {
+            if (cat === 'COMMODITY' || cat === 'FOREX' || cat === 'CRYPTO' || cat === 'COMEX') {
                 return true;
             }
         }
         const mType = (marketType || '').toUpperCase();
-        return mType === 'COMMODITY' || mType === 'FOREX' || mType === 'CRYPTO';
+        return mType === 'COMMODITY' || mType === 'FOREX' || mType === 'CRYPTO' || mType === 'COMEX';
     }
 
     /**

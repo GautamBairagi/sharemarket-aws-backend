@@ -7,6 +7,7 @@ const { getMcxBaseScrip, getLotSize } = require('../utils/symbolHelper');
 const { buildTradeLog } = require('../utils/logFormatter');
 const MarginService = require('../services/MarginService');
 const tradeService = require('../services/TradeService');
+const { getSegmentExposure, isOptionsSymbol } = require('../utils/segmentHelper');
 
 const syncPaperPosition = async (userId, symbol, connection = db) => {
     try {
@@ -1429,15 +1430,21 @@ const placeOrder = async (req, res) => {
         let newMarginRequired = 0;
         const finalTurnover = executionPrice * actualQty;
 
-        if (isNseEquity || isNseDerivative) {
-            // NSE/NFO: Exposure-based (Turnover / Divisor)
-            const leverage = tradeType === 'HOLDING'
-                ? parseFloat(clientConfig?.equityHoldingMargin || 100)
-                : parseFloat(clientConfig?.equityIntradayMargin || 500);
+        if (isOptionsSymbol(sym) && type.toUpperCase() === 'BUY') {
+            // Option Buy requires 100% option premium
+            newMarginRequired = finalTurnover;
+            leverageUsed = 1;
+            console.log(`[placeOrder] 🎯 Option Buy Premium Margin: ${newMarginRequired}`);
+        } else if (isNseEquity || isNseDerivative) {
+            // ✅ Use segment-aware exposure (INDEX_OPTION vs EQUITY_OPTION vs NSE_EQUITY)
+            const segExp = getSegmentExposure(sym, marketType, clientConfig);
+            const exposure = tradeType === 'HOLDING'
+                ? (segExp.holdingExposure || 100)
+                : (segExp.intradayExposure || 500);
 
-            newMarginRequired = finalTurnover / (leverage || 1);
-            leverageUsed = leverage;
-            console.log(`[placeOrder] 🏦 NSE/NFO Margin: ${finalTurnover} / ${leverage} = ${newMarginRequired}`);
+            newMarginRequired = finalTurnover / (exposure || 1);
+            leverageUsed = exposure;
+            console.log(`[placeOrder] 🏦 ${segExp.segmentType} Margin: ${finalTurnover} / ${exposure} = ${newMarginRequired}`);
         } else {
             // Default/MCX: Use MarginService (supports Per Lot Basis)
             try {
@@ -1759,11 +1766,15 @@ const getActivePositions = async (req, res) => {
                 SUM(t.actual_qty) AS total_qty,
                 SUM(COALESCE(t.qty_input, t.qty, 0)) AS total_lots,
                 AVG(t.entry_price) AS avg_price,
-                MAX(sd.lot_size) AS lot_size,
+                MAX(COALESCE(t.lot_size_at_entry, sd.lot_size, 1)) AS lot_size,
+                SUM(CASE WHEN t.status = 'HOLD' OR t.is_carried_forward = 1 THEN COALESCE(t.qty_input, t.qty, 0) ELSE 0 END) AS hold_lots,
+                SUM(CASE WHEN t.status = 'OPEN' AND COALESCE(t.is_carried_forward, 0) = 0 THEN COALESCE(t.qty_input, t.qty, 0) ELSE 0 END) AS open_lots,
+                MAX(t.status) AS status,
+                MAX(t.is_carried_forward) AS is_carried_forward,
                 COUNT(*) AS trade_count
             FROM trades t
             LEFT JOIN scrip_data sd ON t.symbol = sd.symbol
-            WHERE t.status = 'OPEN'
+            WHERE t.status IN ('OPEN', 'HOLD')
               AND t.is_pending = 0
         `;
         const params = [];
@@ -1798,6 +1809,26 @@ const getActivePositions = async (req, res) => {
 
         const [rows] = await db.execute(query, params);
         const commodityLotService = require('../services/CommodityLotService');
+        
+        const MCX_LOT_SIZES = {
+            'GOLD': 100, 'GOLDM': 10, 'MGOLD': 10, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
+            'SILVER': 30, 'SILVERM': 5, 'MSILVER': 5, 'SILVERMIC': 1,
+            'CRUDEOIL': 100, 'CRUDEOILM': 10, 'MCRUDEOIL': 10,
+            'NATURALGAS': 1250, 'NATURALGASM': 125, 'MNATURALGAS': 125, 'NATGASMINI': 250,
+            'COPPER': 2500, 'COPPERM': 250, 'MCOPPER': 250,
+            'ZINC': 5000, 'ZINCMINI': 1000, 'MZINC': 1000,
+            'LEAD': 5000, 'LEADMINI': 1000, 'MLEAD': 1000,
+            'NICKEL': 1500, 'NICKELMINI': 100, 'MNICKEL': 100,
+            'ALUMINIUM': 5000, 'ALUMINI': 1000, 'ALUMINIUMM': 1000, 'MALUMINIUM': 1000,
+            'MENTHAOIL': 360, 'COTTON': 25, 'BULLDEX': 1,
+        };
+
+        const getMcxBaseScrip = (symbol) => {
+            if (!symbol) return '';
+            const s = symbol.split(':').pop().toUpperCase();
+            return s.replace(/\d+.*/, '').trim();
+        };
+
         rows.forEach(pos => {
             const info = commodityLotService.getLotInfo(pos.symbol);
             if (info) {
@@ -1814,6 +1845,24 @@ const getActivePositions = async (req, res) => {
                             pos.usdinr_value = parseFloat(liveUsdInr.ltp || pos.usdinr_value);
                         }
                     } catch (e) {}
+                }
+            } else {
+                // For MCX derivatives & options
+                const cleanSym = pos.symbol.split(':').pop().toUpperCase();
+                const mType = (pos.market_type || 'MCX').toUpperCase();
+                const isMcxSymbol = mType === 'MCX' || pos.symbol.toUpperCase().startsWith('MCX:') || 
+                    ['GOLD', 'SILVER', 'CRUDEOIL', 'NATURALGAS', 'COPPER', 'ZINC', 'NICKEL', 'LEAD', 'ALUMINIUM'].some(k => cleanSym.includes(k));
+                
+                if (isMcxSymbol) {
+                    const base = getMcxBaseScrip(pos.symbol);
+                    if (base && MCX_LOT_SIZES[base]) {
+                        pos.lot_size = MCX_LOT_SIZES[base];
+                    } else {
+                        const symTrimmed = cleanSym.replace(/\d+.*/, '');
+                        if (MCX_LOT_SIZES[symTrimmed]) {
+                            pos.lot_size = MCX_LOT_SIZES[symTrimmed];
+                        }
+                    }
                 }
             }
         });
@@ -1834,8 +1883,14 @@ const getTrades = async (req, res) => {
         const params = [];
 
         if (status) {
-            query += ' AND t.status = ?';
-            params.push(status);
+            if (status === 'OPEN') {
+                query += " AND t.status IN ('OPEN', 'HOLD')";
+            } else if (status === 'CLOSED') {
+                query += " AND t.status IN ('CLOSED', 'SETTLED')";
+            } else {
+                query += ' AND t.status = ?';
+                params.push(status);
+            }
         } else {
             query += " AND t.status != 'DELETED'";
         }
@@ -1906,11 +1961,11 @@ const getTrades = async (req, res) => {
 
         // Filter by date range
         if (req.query.fromDate) {
-            query += ' AND DATE(t.entry_time) >= ?';
+            query += ' AND DATE(COALESCE(t.exit_time, t.entry_time)) >= ?';
             params.push(req.query.fromDate);
         }
         if (req.query.toDate) {
-            query += ' AND DATE(t.entry_time) <= ?';
+            query += ' AND DATE(COALESCE(t.exit_time, t.entry_time)) <= ?';
             params.push(req.query.toDate);
         }
 
@@ -1990,7 +2045,7 @@ const getTrades = async (req, res) => {
                                     : calc.usdInr / 0.90;
                                 trade.usdinr_value = baseRate;
                             } else {
-                                const lotSize = parseFloat(trade.lot_size_at_entry || 1);
+                                const lotSize = parseFloat(trade.lot_size_at_entry || trade.lot_size || 1);
                                 const effectiveLotSize = (trade.trade_mode === 'UNITS' || trade.equity_units_mode === 1) ? 1 : lotSize;
                                 const qtyForPnl = trade.qty * effectiveLotSize;
                                 const entryPrice = parseFloat(trade.entry_price);
@@ -2009,6 +2064,8 @@ const getTrades = async (req, res) => {
 
 
         res.json(rows);
+
+
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');
@@ -2247,7 +2304,7 @@ const closeTrade = async (req, res) => {
         if (trades.length === 0) return res.status(404).json({ message: 'Trade not found' });
 
         const trade = trades[0];
-        if (trade.status !== 'OPEN') {
+        if (trade.status !== 'OPEN' && trade.status !== 'HOLD') {
             return res.status(400).json({ message: 'Trade is already closed or inactive' });
         }
 
@@ -2296,7 +2353,10 @@ const closeTrade = async (req, res) => {
             ? (currentPrice - trade.entry_price) * actualQuantity
             : (trade.entry_price - currentPrice) * actualQuantity;
 
-        if (minTimeSeconds > 0 && !scalpingStopLossEnabled && secondsHeld < minTimeSeconds) {
+        const requesterRole = req.user?.role;
+        const isClient = requesterRole === 'TRADER';
+
+        if (isClient && minTimeSeconds > 0 && !scalpingStopLossEnabled && secondsHeld < minTimeSeconds) {
             return res.status(400).json({
                 message: `Minimum hold time is ${minTimeSeconds} seconds. Please wait ${minTimeSeconds - secondsHeld} more second(s).`,
                 remainingSeconds: minTimeSeconds - secondsHeld
