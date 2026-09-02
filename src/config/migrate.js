@@ -278,6 +278,12 @@ const runMigrations = async () => {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
+    // Ensure ledger table has all needed columns & ENUM values for existing DBs
+    await addColumn('ledger', 'balance_before', 'DECIMAL(18,4) DEFAULT NULL AFTER type');
+    await addColumn('ledger', 'reference_id', 'VARCHAR(100) DEFAULT NULL AFTER balance_after');
+    await addColumn('ledger', 'reference_type', 'VARCHAR(50) DEFAULT NULL AFTER reference_id');
+    try { await db.execute("ALTER TABLE ledger MODIFY COLUMN type ENUM('DEPOSIT','WITHDRAW','TRADE_PNL','BROKERAGE','SWAP','WEEKLY_SETTLEMENT','OPENING_BALANCE') NOT NULL"); } catch (_) { }
+
     await db.execute(`
         CREATE TABLE IF NOT EXISTS weekly_balances (
             id               INT AUTO_INCREMENT PRIMARY KEY,
