@@ -1246,14 +1246,18 @@ async function _buildWatchlistData(query, userId) {
     const results = await Promise.all(chunks.map(chunk => kiteService.getQuote(chunk).catch(() => ({}))));
     for (const r of results) if (r && typeof r === 'object') Object.assign(rawQuotes, r);
 
-    // Fetch lot sizes from database
-    const [lotRows] = await db.execute('SELECT symbol, lot_size FROM scrip_data');
-    const lotMap = {};
-    lotRows.forEach(r => {
-        lotMap[r.symbol.toUpperCase()] = parseFloat(r.lot_size || 1);
-    });
-    
-    console.log(`📊 Loaded ${Object.keys(lotMap).length} lot sizes from scrip_data`);
+    // Fetch lot sizes from database (cached in RAM for 10 minutes to prevent 57,782 row DB queries on every tick)
+    if (!global.LOT_MAP_CACHE || (Date.now() - (global.LOT_MAP_CACHE_TIME || 0)) > 600000) {
+        const [lotRows] = await db.execute('SELECT symbol, lot_size FROM scrip_data');
+        const map = {};
+        lotRows.forEach(r => {
+            if (r.symbol) map[r.symbol.toUpperCase()] = parseFloat(r.lot_size || 1);
+        });
+        global.LOT_MAP_CACHE = map;
+        global.LOT_MAP_CACHE_TIME = Date.now();
+        console.log(`📊 Cached ${Object.keys(map).length} lot sizes from scrip_data in RAM`);
+    }
+    const lotMap = global.LOT_MAP_CACHE;
 
     const getLotSize = (key) => {
         const sym = key.includes(':') ? key.split(':')[1] : key;
@@ -2280,11 +2284,15 @@ async function fetchUnifiedWatchlistForSocket(userId, query = {}) {
             return { ok: false, kite_disconnected: true, data: [], error: 'Kite not connected.' };
         }
 
+        const cacheBust = global.WATCHLIST_CACHE_BUST || 0;
         const configVer = global.WATCHLIST_CONFIG_VERSION || 0;
-        const cacheKey = `${query.nse || ''}_${query.nfoUnderlyings || ''}_${query.mcxOptSymbols || ''}_${query.nfoIndexOptRange || ''}_${WATCHLIST_CACHE_BUST}_v${configVer}`;
+        const cacheKey = `${query.nse || ''}_${query.nfoUnderlyings || ''}_${query.mcxOptSymbols || ''}_${query.nfoIndexOptRange || ''}_${cacheBust}_v${configVer}`;
 
-        if (watchlistCache.data && watchlistCache.key === cacheKey) {
-            console.log(`🔍 fetchUnifiedWatchlistForSocket: CACHE HIT (${watchlistCache.data.length} rows)`);
+        const isCacheValid = watchlistCache.data && 
+                             watchlistCache.key === cacheKey && 
+                             (Date.now() - (watchlistCache.time || 0)) < 3000;
+
+        if (isCacheValid) {
             watchlistLastQuery = query;
             watchlistLastUserId = userId;
             startWatchlistAutoRefresh();

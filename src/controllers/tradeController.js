@@ -347,8 +347,8 @@ const placeOrder = async (req, res) => {
                 LEFT JOIN broker_shares bs ON cs.broker_id = bs.user_id 
                 WHERE cs.user_id = ?
             `, [targetUserId]),
-            // 4. Scrip data
-            db.execute('SELECT market_type, lot_size, expiry_date FROM scrip_data WHERE symbol = ?', [symbol]),
+            // 4. Scrip data (lookup by full symbol or clean symbol without exchange prefix)
+            db.execute('SELECT market_type, lot_size, expiry_date FROM scrip_data WHERE symbol = ? OR symbol = ?', [symbol, symbol.includes(':') ? symbol.split(':')[1] : symbol]),
             // 5. Expiry rules
             db.execute('SELECT * FROM expiry_rules WHERE id = 1'),
             // 6. Banned scrip check
@@ -844,15 +844,20 @@ const placeOrder = async (req, res) => {
         if (marketType === 'EQUITY') {
             const maxLotScrip = parseInt(clientConfig.equityMaxScrip || 0);
             if (maxLotScrip > 0) {
-                const currentNetQty = openTradesRows
-                    .filter(t => t.symbol === symbol)
+                const currentNetQtyRaw = openTradesRows
+                    .filter(t => isSameInstrument(t.symbol, symbol, marketType))
                     .reduce((sum, t) => sum + (t.type.toUpperCase() === 'BUY' ? 1 : -1) * parseFloat(t.qty || 0), 0);
-                const incomingQty = (isNSEEq || isNSEDer) ? orderActualQty : qtyNum;
-                const newTotalForSymbol = Math.abs(currentNetQty + orderSide * incomingQty);
+                
+                // Convert database unit quantity to lot count if scrip has lotSize > 1
+                const currentNetLots = (lotSz > 1 && Math.abs(currentNetQtyRaw) >= lotSz) 
+                    ? Math.round(currentNetQtyRaw / lotSz) 
+                    : currentNetQtyRaw;
+
+                const newTotalForSymbol = Math.abs(currentNetLots + orderSide * qtyNum);
 
                 if (newTotalForSymbol > maxLotScrip) {
                     return res.status(400).json({
-                        message: `Max lot size for ${symbol} is ${maxLotScrip}. Current Net: ${currentNetQty}, New trade: ${incomingQty}, Total would be: ${newTotalForSymbol}`
+                        message: `Max lot size for ${symbol} is ${maxLotScrip}. Current Net: ${currentNetLots} lot(s), New trade: ${qtyNum} lot(s), Total would be: ${newTotalForSymbol} lot(s)`
                     });
                 }
             }
@@ -875,15 +880,19 @@ const placeOrder = async (req, res) => {
 
         if (marketType === 'EQUITY') {
             const maxSizeAll = parseInt(clientConfig.equityMaxSizeAll || 2000);
-            const currentNetAll = openTradesRows
+            const currentNetAllRaw = openTradesRows
                 .filter(t => (t.market_type || '').toUpperCase() === 'EQUITY')
                 .reduce((sum, t) => sum + (t.type.toUpperCase() === 'BUY' ? 1 : -1) * parseFloat(t.qty || 0), 0);
-            const incomingQty = (isNSEEq || isNSEDer) ? orderActualQty : qtyNum;
-            const newTotal = Math.abs(currentNetAll + orderSide * incomingQty);
+
+            const currentNetAllLots = (lotSz > 1 && Math.abs(currentNetAllRaw) >= lotSz)
+                ? Math.round(currentNetAllRaw / lotSz)
+                : currentNetAllRaw;
+
+            const newTotal = Math.abs(currentNetAllLots + orderSide * qtyNum);
 
             if (newTotal > maxSizeAll) {
                 return res.status(400).json({
-                    message: `Total Equity position limit is ${maxSizeAll}. Current Net: ${currentNetAll}, New trade: ${incomingQty}, Total would be: ${newTotal}`
+                    message: `Total Equity position limit is ${maxSizeAll}. Current Net: ${currentNetAllLots} lot(s), New trade: ${qtyNum} lot(s), Total would be: ${newTotal} lot(s)`
                 });
             }
         }
@@ -2326,8 +2335,8 @@ const closeTrade = async (req, res) => {
         else if (mt === 'FOREX') scalpingStopLossEnabled = (clientConfig.forexConfig || {}).scalpingStopLoss === 'Enabled';
         else if (mt === 'COMEX' || mt === 'COMMODITY') scalpingStopLossEnabled = (clientConfig.comexConfig || {}).scalpingStopLoss === 'Enabled';
 
-        const secondsHeld = getTradeAgeInSeconds(trade.entry_time);
-        const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [trade.symbol]);
+        const cleanScripSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
+        const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ? OR symbol = ?', [trade.symbol, cleanScripSymbol]);
         const lotSize = (scripRows.length > 0) ? parseFloat(scripRows[0].lot_size || 1) : 1;
 
         const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;

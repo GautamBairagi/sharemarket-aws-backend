@@ -3,6 +3,7 @@ const PDFDocument = require('pdfkit');
 const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios');
 
 /**
  * 1. Fetch All Active / Registered Scrip Symbols Across Segments
@@ -329,88 +330,23 @@ const downloadPdf = async (req, res) => {
     }
 };
 
+const { fork } = require('child_process');
+
 /**
- * 6. Send Email with PDF Attachment & Purge Database
+ * 6. Send Email with PDF Attachment & Purge Database via Isolated Worker Process
  */
 const sendPdfReportAndPurge = async ({ forceAll = false, daysBefore = 7 } = {}) => {
-    const [settingsRows] = await db.execute('SELECT * FROM scrip_export_settings WHERE id = 1');
-    const settings = settingsRows[0] || {};
-    const targetEmail = settings.export_email;
+    const [settingsRows] = await db.execute('SELECT export_email FROM scrip_export_settings WHERE id = 1');
+    const targetEmail = settingsRows[0]?.export_email || 'superadmin@trading.com';
 
-    if (!targetEmail) {
-        throw new Error('Export email address is not configured in Settings.');
-    }
+    const workerPath = path.join(__dirname, '../workers/pdfExportWorker.js');
+    const worker = fork(workerPath, [JSON.stringify({ forceAll, daysBefore })], { execArgv: ['--max-old-space-size=4096'] });
 
-    let query = forceAll
-        ? 'SELECT id, scrip_id, exchange_time, system_time, bid, ask, high, low, ltp FROM scrip_ticks_history ORDER BY id DESC LIMIT 5000'
-        : `SELECT id, scrip_id, exchange_time, system_time, bid, ask, high, low, ltp FROM scrip_ticks_history WHERE created_at < NOW() - INTERVAL ${parseInt(daysBefore, 10)} DAY ORDER BY id DESC LIMIT 5000`;
-
-    const [rows] = await db.execute(query);
-
-    if (rows.length === 0) {
-        console.log('[scripTickController] ℹ️ No tick records found for cleanup export.');
-        return { count: 0, message: 'No records to purge' };
-    }
-
-    const reportsDir = path.join(__dirname, '../../uploads/reports');
-    if (!fs.existsSync(reportsDir)) {
-        fs.mkdirSync(reportsDir, { recursive: true });
-    }
-
-    const pdfPath = path.join(reportsDir, `script_data_export_${Date.now()}.pdf`);
-    const writeStream = fs.createWriteStream(pdfPath);
-    const doc = createPdfStream(rows, `Total Records: ${rows.length}`);
-
-    doc.pipe(writeStream);
-    doc.end();
-
-    await new Promise((resolve, reject) => {
-        writeStream.on('finish', resolve);
-        writeStream.on('error', reject);
+    worker.on('exit', (code) => {
+        console.log(`[scripTickController] 👷 Worker process finished with exit code ${code}`);
     });
 
-    const smtpHost = process.env.SMTP_HOST || 'smtp.gmail.com';
-    const smtpPort = parseInt(process.env.SMTP_PORT || '587', 10);
-    const smtpUser = process.env.SMTP_USER;
-    const smtpPass = process.env.SMTP_PASS;
-
-    if (!smtpUser || !smtpPass) {
-        console.warn('[scripTickController] ⚠️ SMTP credentials not set in ENV. Skipping email send but PDF report generated.');
-    } else {
-        const transporter = nodemailer.createTransport({
-            host: smtpHost,
-            port: smtpPort,
-            secure: smtpPort === 465,
-            auth: { user: smtpUser, pass: smtpPass }
-        });
-
-        await transporter.sendMail({
-            from: `"Trading App" <${smtpUser}>`,
-            to: targetEmail,
-            subject: `📊 Script Data Export & Purge Report (${rows.length} records)`,
-            text: `Hello Superadmin,\n\nPlease find attached the exported Script Data tick report containing ${rows.length} records.\n\nThe database has been cleaned to prevent lag.\n\nBest regards,\nTrading System`,
-            attachments: [
-                {
-                    filename: `ScriptData_Report_${new Date().toISOString().slice(0, 10)}.pdf`,
-                    path: pdfPath
-                }
-            ]
-        });
-        console.log(`[scripTickController] ✅ Email sent successfully to ${targetEmail}`);
-    }
-
-    let deleteQuery = forceAll
-        ? 'DELETE FROM scrip_ticks_history'
-        : `DELETE FROM scrip_ticks_history WHERE created_at < NOW() - INTERVAL ${parseInt(daysBefore, 10)} DAY`;
-
-    const [deleteResult] = await db.execute(deleteQuery);
-    console.log(`[scripTickController] 🗑️ Purged ${deleteResult.affectedRows} records from scrip_ticks_history`);
-
-    if (fs.existsSync(pdfPath)) {
-        fs.unlinkSync(pdfPath);
-    }
-
-    return { count: deleteResult.affectedRows, emailSentTo: targetEmail };
+    return { count: 0, emailSentTo: targetEmail };
 };
 
 /**
@@ -419,14 +355,23 @@ const sendPdfReportAndPurge = async ({ forceAll = false, daysBefore = 7 } = {}) 
 const triggerCleanup = async (req, res) => {
     try {
         const { forceAll = false, daysBefore = 7 } = req.body;
-        const result = await sendPdfReportAndPurge({ forceAll, daysBefore });
+
+        const [settingsRows] = await db.execute('SELECT export_email FROM scrip_export_settings WHERE id = 1');
+        const targetEmail = settingsRows[0]?.export_email || 'superadmin@trading.com';
+
+        const workerPath = path.join(__dirname, '../workers/pdfExportWorker.js');
+        const worker = fork(workerPath, [JSON.stringify({ forceAll, daysBefore })]);
+
+        worker.on('exit', (code) => {
+            console.log(`[scripTickController] 👷 Worker process finished with exit code ${code}`);
+        });
+
         return res.json({
             success: true,
-            message: `Successfully exported and cleared ${result.count} records. Sent to ${result.emailSentTo || 'configured email'}.`,
-            count: result.count
+            message: `⚡ Instant Export & Clear initiated! All records are being exported into 1 PDF report and emailed to ${targetEmail} in background.`
         });
     } catch (err) {
-        console.error('[scripTickController] Manual cleanup error:', err.message);
+        console.error('[scripTickController] Manual cleanup trigger error:', err.message);
         return res.status(500).json({ success: false, message: err.message });
     }
 };
