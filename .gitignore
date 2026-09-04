@@ -6,3 +6,11 @@ node_modules
 
 # Cache files (auto-generated with timestamps)
 src/data/contracts_cache.json
+
+# Uploads & Runtime Generated Reports / Files
+uploads/
+*.csv
+*.pdf
+*.zip
+*.log
+

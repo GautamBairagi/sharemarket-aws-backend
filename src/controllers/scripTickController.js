@@ -4,6 +4,7 @@ const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const { fork } = require('child_process');
 
 /**
  * 1. Fetch All Active / Registered Scrip Symbols Across Segments
@@ -330,16 +331,18 @@ const downloadPdf = async (req, res) => {
     }
 };
 
-const { fork } = require('child_process');
+const getWorkerPath = () => {
+    return path.join(__dirname, '../workers/s3ExportWorker.js');
+};
 
 /**
- * 6. Send Email with PDF Attachment & Purge Database via Isolated Worker Process
+ * 6. Send Email with Attachment/S3 Link & Purge Database via Isolated Worker Process
  */
 const sendPdfReportAndPurge = async ({ forceAll = false, daysBefore = 7 } = {}) => {
     const [settingsRows] = await db.execute('SELECT export_email FROM scrip_export_settings WHERE id = 1');
     const targetEmail = settingsRows[0]?.export_email || 'superadmin@trading.com';
 
-    const workerPath = path.join(__dirname, '../workers/pdfExportWorker.js');
+    const workerPath = getWorkerPath();
     const worker = fork(workerPath, [JSON.stringify({ forceAll, daysBefore })], { execArgv: ['--max-old-space-size=4096'] });
 
     worker.on('exit', (code) => {
@@ -359,19 +362,40 @@ const triggerCleanup = async (req, res) => {
         const [settingsRows] = await db.execute('SELECT export_email FROM scrip_export_settings WHERE id = 1');
         const targetEmail = settingsRows[0]?.export_email || 'superadmin@trading.com';
 
-        const workerPath = path.join(__dirname, '../workers/pdfExportWorker.js');
-        const worker = fork(workerPath, [JSON.stringify({ forceAll, daysBefore })]);
+        const workerPath = getWorkerPath();
+        const worker = fork(workerPath, [JSON.stringify({ forceAll, daysBefore })], { execArgv: ['--max-old-space-size=4096'] });
 
         worker.on('exit', (code) => {
             console.log(`[scripTickController] 👷 Worker process finished with exit code ${code}`);
         });
 
+        const isS3 = workerPath.includes('s3ExportWorker');
+        const exportType = isS3 ? 'Amazon S3 ZIP Archive with 7-Day Download Link' : 'PDF Report';
+
         return res.json({
             success: true,
-            message: `⚡ Instant Export & Clear initiated! All records are being exported into 1 PDF report and emailed to ${targetEmail} in background.`
+            message: `⚡ Instant Export & Clear initiated! ${exportType} is being prepared and emailed to ${targetEmail} in background.`
         });
     } catch (err) {
         console.error('[scripTickController] Manual cleanup trigger error:', err.message);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+};
+
+/**
+ * 8. Get Total Database Row Count for scrip_ticks_history
+ */
+const getTotalDbCount = async (req, res) => {
+    try {
+        const [rows] = await db.execute("SELECT TABLE_ROWS FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'scrip_ticks_history'");
+        let count = rows[0]?.TABLE_ROWS ? parseInt(rows[0].TABLE_ROWS, 10) : 0;
+        if (!count || count === 0) {
+            const [cRows] = await db.execute("SELECT COUNT(*) as cnt FROM scrip_ticks_history");
+            count = parseInt(cRows[0]?.cnt || 0, 10);
+        }
+        return res.json({ success: true, count });
+    } catch (err) {
+        console.error('[scripTickController] Error fetching total DB count:', err.message);
         return res.status(500).json({ success: false, message: err.message });
     }
 };
@@ -383,5 +407,7 @@ module.exports = {
     updateExportSettings,
     downloadPdf,
     triggerCleanup,
-    sendPdfReportAndPurge
+    sendPdfReportAndPurge,
+    getTotalDbCount
 };
+

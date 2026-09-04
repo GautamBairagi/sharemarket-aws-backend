@@ -145,11 +145,10 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
         const totalDeposit = parseFloat(fundTotals[0]?.deposits || 0);
         const totalWithdrawal = parseFloat(fundTotals[0]?.withdrawals || 0);
 
-        // Net Week Result & New Closing Balance
-        const netWeekResult = realizedPnl - brokerage - charges + totalDeposit - totalWithdrawal;
-        const closingBalance = openingBalance + (realizedPnl - brokerage - charges) + totalDeposit - totalWithdrawal;
+        // Preliminary closing balance before open trade MTM settlement
+        const prelimClosingBalance = openingBalance + (realizedPnl - brokerage - charges) + totalDeposit - totalWithdrawal;
 
-        // 6. Process Open / Holding Trades — Evaluate Holding Margin
+        // 6. Process Open / Holding Trades — Evaluate Holding Margin & Weekly MTM Settlement
         const [openTrades] = await connection.execute(
             `SELECT * FROM trades 
              WHERE user_id = ? AND status IN ('OPEN', 'HOLD') 
@@ -157,9 +156,11 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
             [userId]
         );
 
-        let availableHoldingMargin = Math.max(0, closingBalance);
+        let availableHoldingMargin = Math.max(0, prelimClosingBalance);
         let carriedForwardCount = 0;
         let settledTradesCount = 0;
+        let totalUnrealizedMtmPnl = 0;
+        const carriedForwardItems = [];
 
         for (const trade of openTrades) {
             let requiredMargin = parseFloat(trade.margin_used || 0);
@@ -185,28 +186,63 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
                 }
             }
 
+            const settlementPrice = parseFloat(trade.current_price || trade.exit_price || trade.entry_price || 0);
+
             // Check if user has sufficient margin to hold
             if (availableHoldingMargin >= requiredMargin) {
-                // CASE A: Sufficient Holding Margin -> Carry Forward (HOLD) with ₹0 new week brokerage
+                // CASE A: Sufficient Holding Margin -> Carry Forward (HOLD) with Weekly MTM Settlement (Brokerage ₹0)
                 availableHoldingMargin -= requiredMargin;
+
+                const baselinePrice = (trade.last_settlement_price !== null && trade.last_settlement_price !== undefined)
+                    ? parseFloat(trade.last_settlement_price)
+                    : parseFloat(trade.entry_price);
+
+                const isBuy = (trade.type || 'BUY').toUpperCase() === 'BUY';
+                const lotMult = parseFloat(trade.lot_size || 1);
+                const qtyVal = parseFloat(trade.qty || 1);
+                const weeklyMtmPnl = isBuy 
+                    ? (settlementPrice - baselinePrice) * qtyVal * lotMult
+                    : (baselinePrice - settlementPrice) * qtyVal * lotMult;
+
+                totalUnrealizedMtmPnl += weeklyMtmPnl;
+
                 await connection.execute(
                     `UPDATE trades 
                      SET status = 'HOLD',
                          is_carried_forward = 1,
                          carry_forward_from_week = ?,
-                         carry_forward_to_week = ?
+                         carry_forward_to_week = ?,
+                         settlement_price = ?,
+                         last_settlement_price = ?,
+                         accumulated_settled_pnl = accumulated_settled_pnl + ?
                      WHERE id = ?`,
-                    [weekEnd, weekStart, trade.id]
+                    [weekEnd, weekStart, settlementPrice, settlementPrice, weeklyMtmPnl, trade.id]
                 );
+
+                carriedForwardItems.push({
+                    tradeId: trade.id,
+                    symbol: trade.symbol,
+                    type: trade.type,
+                    qty: trade.qty,
+                    lotSize: trade.lot_size || 1,
+                    originalEntryPrice: parseFloat(trade.entry_price),
+                    settlementPrice,
+                    settledPnl: weeklyMtmPnl,
+                    brokerage: 0
+                });
+
                 carriedForwardCount++;
             } else {
                 // CASE B: Insufficient Holding Margin -> Auto Square-off / Settle
-                const exitPrice = parseFloat(trade.current_price || trade.entry_price || 0);
+                const exitPrice = settlementPrice;
                 const isBuy = (trade.type || 'BUY').toUpperCase() === 'BUY';
-                const lotMult = trade.lot_size || 1;
+                const lotMult = parseFloat(trade.lot_size || 1);
+                const qtyVal = parseFloat(trade.qty || 1);
+
+                // Full P&L relative to original entry price
                 const pnl = isBuy 
-                    ? (exitPrice - parseFloat(trade.entry_price)) * parseFloat(trade.qty) * lotMult
-                    : (parseFloat(trade.entry_price) - exitPrice) * parseFloat(trade.qty) * lotMult;
+                    ? (exitPrice - parseFloat(trade.entry_price)) * qtyVal * lotMult
+                    : (parseFloat(trade.entry_price) - exitPrice) * qtyVal * lotMult;
 
                 await connection.execute(
                     `UPDATE trades 
@@ -223,18 +259,23 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
             }
         }
 
+        // Net Week Result & Final Closing Balance including MTM Settlement
+        const netWeekResult = (realizedPnl - brokerage - charges) + totalDeposit - totalWithdrawal + totalUnrealizedMtmPnl;
+        const closingBalance = openingBalance + netWeekResult;
+
         // 7. Insert / Update weekly_settlements Record
         const [settlementResult] = await connection.execute(
             `INSERT INTO weekly_settlements (
                 user_id, week_start_date, week_end_date,
-                opening_balance, realized_pnl, brokerage, charges,
+                opening_balance, realized_pnl, unrealized_mtm_pnl, brokerage, charges,
                 total_deposit, total_withdrawal, net_week_result, closing_balance,
                 carried_forward_trades_count, settled_trades_count,
                 settlement_status, settled_at, settled_by_user_id, notes
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', NOW(), ?, ?)
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', NOW(), ?, ?)
              ON DUPLICATE KEY UPDATE
                 opening_balance = VALUES(opening_balance),
                 realized_pnl = VALUES(realized_pnl),
+                unrealized_mtm_pnl = VALUES(unrealized_mtm_pnl),
                 brokerage = VALUES(brokerage),
                 charges = VALUES(charges),
                 total_deposit = VALUES(total_deposit),
@@ -249,7 +290,7 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
                 notes = VALUES(notes)`,
             [
                 userId, weekStart, weekEnd,
-                openingBalance, realizedPnl, brokerage, charges,
+                openingBalance, realizedPnl, totalUnrealizedMtmPnl, brokerage, charges,
                 totalDeposit, totalWithdrawal, netWeekResult, closingBalance,
                 carriedForwardCount, settledTradesCount,
                 settledByUserId,
@@ -259,16 +300,37 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
 
         const settlementId = settlementResult.insertId || existing[0]?.id;
 
-        // Tag trades with settlement_id
+        // Tag trades & insert itemized records into weekly_settlement_items
         if (settlementId) {
             await connection.execute(
                 `UPDATE trades 
                  SET settlement_id = ? 
                  WHERE user_id = ? 
-                   AND DATE(COALESCE(exit_time, entry_time)) >= ? 
-                   AND DATE(COALESCE(exit_time, entry_time)) <= ?`,
+                   AND (
+                       (DATE(COALESCE(exit_time, entry_time)) >= ? AND DATE(COALESCE(exit_time, entry_time)) <= ?)
+                       OR status = 'HOLD'
+                   )`,
                 [settlementId, userId, weekStart, weekEnd]
             );
+
+            // Clean existing items for this settlement (idempotency safety)
+            await connection.execute(
+                `DELETE FROM weekly_settlement_items WHERE settlement_id = ?`,
+                [settlementId]
+            );
+
+            for (const item of carriedForwardItems) {
+                await connection.execute(
+                    `INSERT INTO weekly_settlement_items 
+                     (settlement_id, user_id, trade_id, symbol, type, qty, lot_size, original_entry_price, settlement_price, settled_pnl, brokerage, is_carried_forward)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+                    [
+                        settlementId, userId, item.tradeId, item.symbol, item.type,
+                        item.qty, item.lotSize, item.originalEntryPrice, item.settlementPrice,
+                        item.settledPnl, item.brokerage
+                    ]
+                );
+            }
         }
 
         // 8. Update User's Balance and create Ledger Transaction Audit Trail
@@ -286,7 +348,7 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
                 openingBalance,
                 closingBalance,
                 String(settlementId),
-                `Weekly Settlement for period ${weekStart} to ${weekEnd}`
+                `Weekly Settlement for period ${weekStart} to ${weekEnd} (Realized PnL: ₹${realizedPnl.toFixed(2)}, MTM PnL: ₹${totalUnrealizedMtmPnl.toFixed(2)}, Brokerage: ₹${brokerage.toFixed(2)})`
             ]
         );
 

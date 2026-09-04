@@ -121,7 +121,7 @@ const debugLatestActionLedger = async (req, res) => {
  *   value        : string | { intraday, holding } | { [scrip]: { INTRADAY, HOLDING } }
  */
 const globalBatchUpdate = async (req, res) => {
-    const { target, targetIds, brokerId, segment, parameter, marginType, value } = req.body;
+    const { target, targetIds, brokerId, segment, parameter, marginType, value, configUpdates } = req.body;
 
     try {
         // ── 1. Resolve which user IDs to update ──────────────────────────────
@@ -154,71 +154,138 @@ const globalBatchUpdate = async (req, res) => {
         if (!userIds.length)
             return res.status(400).json({ message: 'No users found to update' });
 
-        // ── 2. Build the SQL field to update ─────────────────────────────────
+        // ── 2. Build the SQL field to update in user_segments if legacy parameter is passed ───────────────────
         let field = null;
         let fieldValue = null;
 
         if (parameter === 'Brokerage') {
             field = 'brokerage_value';
             fieldValue = parseFloat(value) || 0;
-
         } else if (parameter === 'Leverage') {
             field = 'leverage';
             fieldValue = parseInt(value) || 1;
-
         } else if (parameter === 'Max Lot') {
             field = 'max_lot_per_scrip';
             fieldValue = parseInt(value) || 1;
-
         } else if (parameter === 'Exposure Multiplier') {
             field = 'exposure_multiplier';
             fieldValue = parseFloat(value) || 1;
-
         } else if (parameter === 'Margin') {
             if (marginType === 'Exposure') {
-                // value = { intraday, holding } — store as exposure_multiplier
-                // We update margin_type to EXPOSURE and exposure_multiplier to intraday value
                 field = 'exposure_multiplier';
                 fieldValue = parseFloat(value?.intraday) || 1;
             } else {
-                // Lot-wise — store as margin_type='PER_LOT'
                 field = 'margin_type';
                 fieldValue = 'PER_LOT';
             }
-        } else {
-            return res.status(400).json({ message: 'Invalid parameter' });
         }
 
-        // ── 3. Apply update to user_segments for each user ───────────────────
+        // Prepare config payload to merge into client_settings.config_json
+        const payloadToMerge = configUpdates || {};
+        if (value && typeof value === 'object' && !configUpdates) {
+            Object.assign(payloadToMerge, value);
+        } else if (value && typeof value !== 'object' && !configUpdates && field) {
+            payloadToMerge[field] = value;
+        }
+
+        // ── 3. Apply update to client_settings and user_segments for each user ───────────────────
         let updatedCount = 0;
 
         for (const uid of userIds) {
-            // Upsert: if row exists update, else insert with default values
-            await db.execute(
-                `INSERT INTO user_segments (user_id, segment, is_enabled, ${field})
-                 VALUES (?, ?, 1, ?)
-                 ON DUPLICATE KEY UPDATE ${field} = ?`,
-                [uid, segment, fieldValue, fieldValue]
-            );
+            // Update user_segments if field is mapped
+            if (field && fieldValue !== null) {
+                await db.execute(
+                    `INSERT INTO user_segments (user_id, segment, is_enabled, ${field})
+                     VALUES (?, ?, 1, ?)
+                     ON DUPLICATE KEY UPDATE ${field} = ?`,
+                    [uid, segment, fieldValue, fieldValue]
+                );
+            }
+
+            // Fetch current client_settings config_json
+            const [csRows] = await db.execute(`SELECT config_json, min_time_to_book_profit, scalping_sl_enabled FROM client_settings WHERE user_id = ?`, [uid]);
+            let currentConfig = {};
+            if (csRows.length > 0 && csRows[0].config_json) {
+                try { currentConfig = JSON.parse(csRows[0].config_json); } catch (e) { currentConfig = {}; }
+            }
+
+            // Merge new updates into config_json
+            const mergedConfig = { ...currentConfig, ...payloadToMerge };
+            const mergedJson = JSON.stringify(mergedConfig);
+
+            // Extract specific columns if present in payloadToMerge
+            let minProfitTime = csRows[0]?.min_time_to_book_profit ?? 120;
+            if (payloadToMerge.mcxMinTimeToBookProfit !== undefined) minProfitTime = parseInt(payloadToMerge.mcxMinTimeToBookProfit) || 0;
+            if (payloadToMerge.equityMinTimeToBookProfit !== undefined) minProfitTime = parseInt(payloadToMerge.equityMinTimeToBookProfit) || 0;
+
+            let scalpingSl = csRows[0]?.scalping_sl_enabled ?? 0;
+            if (payloadToMerge.mcxScalpingStopLoss !== undefined) scalpingSl = payloadToMerge.mcxScalpingStopLoss === 'Enabled' ? 1 : 0;
+            if (payloadToMerge.equityScalpingStopLoss !== undefined) scalpingSl = payloadToMerge.equityScalpingStopLoss === 'Enabled' ? 1 : 0;
+
+            await db.execute(`
+                INSERT INTO client_settings (user_id, config_json, min_time_to_book_profit, scalping_sl_enabled)
+                VALUES (?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE 
+                    config_json = VALUES(config_json),
+                    min_time_to_book_profit = VALUES(min_time_to_book_profit),
+                    scalping_sl_enabled = VALUES(scalping_sl_enabled)
+            `, [uid, mergedJson, minProfitTime, scalpingSl]);
+
             updatedCount++;
         }
 
-        // ── 4. Log the action ─────────────────────────────────────────────────
+        // ── 4. Build clean log description with client names & only modified fields ──
+        let targetNamesStr = `Target: ${target} (${updatedCount} users)`;
+        if (userIds.length > 0) {
+            try {
+                const placeholders = userIds.map(() => '?').join(',');
+                const [uRows] = await db.execute(`SELECT username FROM users WHERE id IN (${placeholders})`, userIds);
+                const names = uRows.map(r => r.username);
+                if (names.length === 1) {
+                    targetNamesStr = `Client: ${names[0]}`;
+                } else if (names.length > 1 && names.length <= 3) {
+                    targetNamesStr = `Clients: ${names.join(', ')}`;
+                }
+            } catch (e) {
+                console.error('Failed to fetch usernames for audit log:', e);
+            }
+        }
+
+        const activeUpdates = [];
+        for (const [k, v] of Object.entries(payloadToMerge || {})) {
+            if (v === undefined || v === null || v === '') continue;
+            if (typeof v === 'object') {
+                const nonZeroEntries = Object.entries(v).filter(([_, val]) => {
+                    if (typeof val === 'object' && val !== null) {
+                        return Object.values(val).some(x => x !== undefined && x !== '' && x !== '0' && x !== 0);
+                    }
+                    return val !== undefined && val !== '' && val !== '0' && val !== 0;
+                });
+                if (nonZeroEntries.length > 0) {
+                    activeUpdates.push(`${k}: ${nonZeroEntries.length} items`);
+                }
+            } else {
+                activeUpdates.push(`${k}: ${v}`);
+            }
+        }
+
+        const cleanUpdatesStr = activeUpdates.length > 0 ? activeUpdates.join(', ') : (value ? `${parameter}: ${value}` : 'Updated');
+
         await logAction(
             req.user.id,
             'GLOBAL_BATCH_UPDATE',
-            'user_segments',
-            `Updated ${parameter} → ${JSON.stringify(value)} for ${updatedCount} users | Segment: ${segment} | Target: ${target}`
+            'client_settings',
+            `Global Update [${parameter || 'Batch'}] | Segment: ${segment} | ${targetNamesStr} | Updates: ${cleanUpdatesStr}`
         );
 
         res.json({
-            message: `Successfully updated ${parameter} for ${updatedCount} user(s) in ${segment}`,
+            message: `Successfully applied global update for ${updatedCount} user(s) in ${segment}`,
             updatedCount,
         });
 
     } catch (err) {
         console.error('[globalBatchUpdate]', err);
-        res.status(500).json({ message: 'Server Error' });
+        res.status(500).json({ message: 'Server Error', error: err.message });
     }
 };
 
@@ -233,9 +300,11 @@ const getSegmentValues = async (req, res) => {
         const [rows] = await db.execute(
             `SELECT u.id, u.username, u.full_name,
                     us.brokerage_value, us.leverage, us.max_lot_per_scrip,
-                    us.exposure_multiplier, us.margin_type, us.is_enabled
+                    us.exposure_multiplier, us.margin_type, us.is_enabled,
+                    cs.min_time_to_book_profit, cs.scalping_sl_enabled, cs.config_json
              FROM users u
              LEFT JOIN user_segments us ON us.user_id = u.id AND us.segment = ?
+             LEFT JOIN client_settings cs ON cs.user_id = u.id
              WHERE u.role = 'TRADER'
              ORDER BY u.username ASC`,
             [segment]

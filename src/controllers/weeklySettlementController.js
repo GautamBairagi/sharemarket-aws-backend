@@ -64,6 +64,25 @@ const getSettlementsHistory = async (req, res) => {
             params
         );
 
+        if (rows.length > 0) {
+            const settlementIds = rows.map(r => r.id);
+            const placeholders = settlementIds.map(() => '?').join(',');
+            const [items] = await db.execute(
+                `SELECT * FROM weekly_settlement_items WHERE settlement_id IN (${placeholders}) ORDER BY id ASC`,
+                settlementIds
+            );
+
+            const itemsBySettlement = {};
+            for (const item of items) {
+                if (!itemsBySettlement[item.settlement_id]) itemsBySettlement[item.settlement_id] = [];
+                itemsBySettlement[item.settlement_id].push(item);
+            }
+
+            for (const row of rows) {
+                row.items = itemsBySettlement[row.id] || [];
+            }
+        }
+
         return res.json({ success: true, count: rows.length, data: rows });
     } catch (err) {
         console.error('[weeklySettlementController] History error:', err);

@@ -21,4 +21,8 @@ router.get('/export-pdf', authMiddleware, scripTickController.downloadPdf);
 // Manual trigger for PDF export & database cleanup
 router.post('/cleanup', authMiddleware, scripTickController.triggerCleanup);
 
+// Get total database tick records count
+router.get('/total-count', authMiddleware, scripTickController.getTotalDbCount);
+
 module.exports = router;
+

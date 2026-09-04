@@ -2335,6 +2335,7 @@ const closeTrade = async (req, res) => {
         else if (mt === 'FOREX') scalpingStopLossEnabled = (clientConfig.forexConfig || {}).scalpingStopLoss === 'Enabled';
         else if (mt === 'COMEX' || mt === 'COMMODITY') scalpingStopLossEnabled = (clientConfig.comexConfig || {}).scalpingStopLoss === 'Enabled';
 
+        const secondsHeld = getTradeAgeInSeconds(trade.entry_time);
         const cleanScripSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
         const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ? OR symbol = ?', [trade.symbol, cleanScripSymbol]);
         const lotSize = (scripRows.length > 0) ? parseFloat(scripRows[0].lot_size || 1) : 1;
@@ -2923,8 +2924,8 @@ const setTargetSL = async (req, res) => {
             return res.status(403).json({ message: 'Not authorized to modify this trade' });
         }
 
-        // Only open trades can have target/SL set
-        if (trade.status !== 'OPEN') {
+        // Only open or hold trades can have target/SL set
+        if (trade.status !== 'OPEN' && trade.status !== 'HOLD') {
             return res.status(400).json({ message: 'Trade is not open' });
         }
 

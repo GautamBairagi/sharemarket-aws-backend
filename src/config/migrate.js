@@ -257,6 +257,8 @@ const runMigrations = async () => {
     await addColumn('trades', 'settlement_id', 'INT DEFAULT NULL');
     await addColumn('trades', 'settlement_price', 'DECIMAL(18,4) DEFAULT NULL');
     await addColumn('trades', 'settlement_time', 'TIMESTAMP NULL DEFAULT NULL');
+    await addColumn('trades', 'last_settlement_price', 'DECIMAL(18,4) DEFAULT NULL');
+    await addColumn('trades', 'accumulated_settled_pnl', 'DECIMAL(18,4) DEFAULT 0');
     await addIndex('trades', 'idx_trades_settlement', 'settlement_id');
     await addIndex('trades', 'idx_trades_cf', 'is_carried_forward');
 
@@ -324,6 +326,31 @@ const runMigrations = async () => {
             KEY idx_week_dates (week_start_date, week_end_date),
             KEY idx_settlement_status (settlement_status),
             CONSTRAINT fk_ws_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    await addColumn('weekly_settlements', 'unrealized_mtm_pnl', 'DECIMAL(18,4) DEFAULT 0 AFTER realized_pnl');
+
+    await db.execute(`
+        CREATE TABLE IF NOT EXISTS weekly_settlement_items (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            settlement_id INT NOT NULL,
+            user_id INT NOT NULL,
+            trade_id INT NOT NULL,
+            symbol VARCHAR(50) NOT NULL,
+            type ENUM('BUY','SELL') NOT NULL,
+            qty INT NOT NULL,
+            lot_size INT DEFAULT 1,
+            original_entry_price DECIMAL(18,4) NOT NULL,
+            settlement_price DECIMAL(18,4) NOT NULL,
+            settled_pnl DECIMAL(18,4) NOT NULL DEFAULT 0,
+            brokerage DECIMAL(18,4) NOT NULL DEFAULT 0,
+            is_carried_forward TINYINT(1) DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_wsi_settlement (settlement_id),
+            KEY idx_wsi_user (user_id),
+            KEY idx_wsi_trade (trade_id),
+            CONSTRAINT fk_wsi_settlement FOREIGN KEY (settlement_id) REFERENCES weekly_settlements(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
