@@ -53,22 +53,22 @@ const monitorPendingOrders = async () => {
                 const limitPrice = parseFloat(trade.entry_price);
                 let shouldExecute = false;
 
-                // 🎯 REVISED EXECUTION LOGIC:
-                // User wants strict matching: Execute ONLY if market price hits the exact limit price.
-                // This prevents immediate execution when the current price is already "better" than the limit.
-                // We use a very small tolerance (0.0001% or 0.05 points) to handle decimal precision.
-                const priceDiff = Math.abs(currentPrice - limitPrice);
-                const tolerance = Math.max(limitPrice * 0.000001, 0.05);
+                const tradeType = (trade.type || '').toUpperCase();
 
-                if (priceDiff <= tolerance) {
+                // 🎯 EXECUTION LOGIC:
+                // - Buy: Execute if market price moves at or below the pending Buy price.
+                // - Sell: Execute if market price moves at or above the pending Sell price.
+                if (tradeType === 'BUY' && currentPrice <= limitPrice) {
+                    shouldExecute = true;
+                } else if (tradeType === 'SELL' && currentPrice >= limitPrice) {
                     shouldExecute = true;
                 }
 
                 if (shouldExecute) {
-                    console.log(`[PendingOrder] 🚀 EXECUTING Trade #${trade.id} (${trade.symbol}) at ${currentPrice} (Limit: ${limitPrice})`);
+                    console.log(`[PendingOrder] 🚀 EXECUTING Trade #${trade.id} (${trade.symbol}) at limit ₹${limitPrice} (Market: ₹${currentPrice})`);
 
-                    // Call TradeService to handle netting and execution
-                    const res = await tradeService.executePendingOrderNetting(trade.id, currentPrice);
+                    // Call TradeService to handle netting and execution at limitPrice
+                    const res = await tradeService.executePendingOrderNetting(trade.id, limitPrice);
 
                     // Log the execution
                     const lotSize = getLotSize(trade.symbol, trade.market_type);
@@ -89,7 +89,7 @@ const monitorPendingOrders = async () => {
                         const remainingQty = res.nettingRes?.remainingQty;
                         if (remainingQty === undefined || remainingQty > 0) {
                             io.to(`user:${trade.user_id}`).emit('notification', {
-                                message: `Pending ${trade.type} order for ${cleanSymbol} executed successfully at ₹${currentPrice}${remainingQty !== undefined ? ` (remaining open: ${remainingQty})` : ''}`,
+                                message: `Pending ${trade.type} order for ${cleanSymbol} executed successfully at ₹${limitPrice}${remainingQty !== undefined ? ` (remaining open: ${remainingQty})` : ''}`,
                                 type: 'ORDER_EXECUTED',
                                 tradeId: trade.id
                             });
