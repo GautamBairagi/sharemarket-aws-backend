@@ -2366,7 +2366,7 @@ const closeTrade = async (req, res) => {
         const requesterRole = req.user?.role;
         const isClient = requesterRole === 'TRADER';
 
-        if (isClient && minTimeSeconds > 0 && !scalpingStopLossEnabled && secondsHeld < minTimeSeconds) {
+        if (!trade.is_pending && isClient && minTimeSeconds > 0 && !scalpingStopLossEnabled && secondsHeld < minTimeSeconds) {
             return res.status(400).json({
                 message: `Minimum hold time is ${minTimeSeconds} seconds. Please wait ${minTimeSeconds - secondsHeld} more second(s).`,
                 remainingSeconds: minTimeSeconds - secondsHeld
