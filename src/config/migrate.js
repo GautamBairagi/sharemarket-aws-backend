@@ -258,6 +258,7 @@ const runMigrations = async () => {
     await addColumn('trades', 'settlement_price', 'DECIMAL(18,4) DEFAULT NULL');
     await addColumn('trades', 'settlement_time', 'TIMESTAMP NULL DEFAULT NULL');
     await addColumn('trades', 'last_settlement_price', 'DECIMAL(18,4) DEFAULT NULL');
+    await addColumn('trades', 'last_market_price', 'DECIMAL(18,4) DEFAULT NULL');
     await addColumn('trades', 'accumulated_settled_pnl', 'DECIMAL(18,4) DEFAULT 0');
     await addIndex('trades', 'idx_trades_settlement', 'settlement_id');
     await addIndex('trades', 'idx_trades_cf', 'is_carried_forward');

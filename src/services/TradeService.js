@@ -1023,7 +1023,7 @@ class TradeService {
     /**
      * Executes netting for a pending order when it gets active.
      */
-    async executePendingOrderNetting(tradeId, currentPrice) {
+    async executePendingOrderNetting(tradeId, limitPrice, marketCrossingPrice) {
         const connection = await db.getConnection();
         try {
             await connection.beginTransaction();
@@ -1039,7 +1039,8 @@ class TradeService {
             if (tradeRows.length === 0) throw new Error('Pending trade not found');
             const trade = tradeRows[0];
             
-            trade.entry_price = currentPrice;
+            const entryPrice = parseFloat(limitPrice || trade.entry_price);
+            trade.entry_price = entryPrice;
 
             const nettingRes = await this.executeNetting(
                 trade.user_id,
@@ -1065,7 +1066,7 @@ class TradeService {
                              qty = ?, qty_input = qty_input * ?, actual_qty = actual_qty * ?, turnover = turnover * ?, margin_used = margin_used * ?
                          WHERE id = ?`,
                         [
-                            currentPrice,
+                            entryPrice,
                             remainingQty,
                             ratio,
                             ratio,
@@ -1079,7 +1080,7 @@ class TradeService {
             } else {
                 await connection.execute(
                     'UPDATE trades SET is_pending = 0, executed_from_pending = 1, entry_time = NOW(), entry_price = ? WHERE id = ?',
-                    [currentPrice, tradeId]
+                    [entryPrice, tradeId]
                 );
                 console.log(`[executePendingOrderNetting] Pending trade #${tradeId} activated without netting.`);
             }

@@ -1521,8 +1521,8 @@ const placeOrder = async (req, res) => {
                 const [result] = await connection.execute(
                     `INSERT INTO trades
                         (user_id, symbol, type, order_type, qty, entry_price, exit_price, margin_used, is_pending, market_type, status, trade_ip, created_by, trade_type, margin_type,
-                         qty_input, actual_qty, lot_size_at_entry, trade_mode, turnover, leverage_used, equity_units_mode, entry_time)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+                         qty_input, actual_qty, lot_size_at_entry, trade_mode, turnover, leverage_used, equity_units_mode, entry_time, last_market_price)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)`,
                     [
                         targetUserId,
                         sym,
@@ -1543,7 +1543,8 @@ const placeOrder = async (req, res) => {
                         tradeMode,
                         finalTurnover.toFixed(2),
                         leverageUsed,
-                        equityUnitsMode
+                        equityUnitsMode,
+                        liveMarketPrice || executionPrice
                     ]
                 );
                 insertedTradeId = result.insertId;

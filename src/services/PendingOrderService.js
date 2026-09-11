@@ -10,13 +10,16 @@ const tradeService = require('./TradeService');
 /**
  * Pending Order Matching Service
  * Periodically checks if pending orders (is_pending = 1) match live prices.
- * If matched, moves trade to active (is_pending = 0).
+ * Uses price-crossing logic:
+ * - BUY:  previousPrice < limitPrice && currentPrice >= limitPrice
+ * - SELL: previousPrice > limitPrice && currentPrice <= limitPrice
+ * Keeps entry_price / Avg Price equal to limitPrice.
  */
 const monitorPendingOrders = async () => {
     try {
         // Fetch all trades that are OPEN and PENDING (is_pending = 1)
         const [pendingTrades] = await db.execute(
-            `SELECT t.id, t.user_id, t.symbol, t.type, t.entry_price, t.qty, t.market_type, u.username, u.balance 
+            `SELECT t.id, t.user_id, t.symbol, t.type, t.entry_price, t.qty, t.market_type, t.last_market_price, u.username, u.balance 
              FROM trades t 
              JOIN users u ON t.user_id = u.id 
              WHERE t.status = 'OPEN' AND t.is_pending = 1`
@@ -51,56 +54,74 @@ const monitorPendingOrders = async () => {
                 if (!currentPrice) continue;
 
                 const limitPrice = parseFloat(trade.entry_price);
-                let shouldExecute = false;
-
                 const tradeType = (trade.type || '').toUpperCase();
 
-                // 🎯 EXECUTION LOGIC:
-                // - Buy: Execute if market price moves at or below the pending Buy price.
-                // - Sell: Execute if market price moves at or above the pending Sell price.
-                if (tradeType === 'BUY' && currentPrice <= limitPrice) {
+                // Retrieve last recorded market price for this pending trade
+                const previousPrice = trade.last_market_price !== null && trade.last_market_price !== undefined
+                    ? parseFloat(trade.last_market_price)
+                    : null;
+
+                if (previousPrice === null) {
+                    // Initialize last_market_price for legacy/newly placed trades if not set yet
+                    await db.execute('UPDATE trades SET last_market_price = ? WHERE id = ?', [currentPrice, trade.id]);
+                    continue;
+                }
+
+                let shouldExecute = false;
+
+                // 🎯 PRICE-CROSSING TRIGGER LOGIC:
+                // - BUY:  previousPrice < limitPrice AND currentPrice >= limitPrice
+                // - SELL: previousPrice > limitPrice AND currentPrice <= limitPrice
+                if (tradeType === 'BUY' && previousPrice < limitPrice && currentPrice >= limitPrice) {
                     shouldExecute = true;
-                } else if (tradeType === 'SELL' && currentPrice >= limitPrice) {
+                } else if (tradeType === 'SELL' && previousPrice > limitPrice && currentPrice <= limitPrice) {
                     shouldExecute = true;
                 }
 
-                if (shouldExecute) {
-                    console.log(`[PendingOrder] 🚀 EXECUTING Trade #${trade.id} (${trade.symbol}) at limit ₹${limitPrice} (Market: ₹${currentPrice})`);
+                if (!shouldExecute) {
+                    // Price hasn't crossed limit yet; update last_market_price for next tick comparison
+                    await db.execute('UPDATE trades SET last_market_price = ? WHERE id = ?', [currentPrice, trade.id]);
+                    continue;
+                }
 
-                    // Call TradeService to handle netting and execution at limitPrice
-                    const res = await tradeService.executePendingOrderNetting(trade.id, limitPrice);
+                console.log(`[PendingOrder] 🚀 EXECUTING Trade #${trade.id} (${trade.symbol}) - Limit: ₹${limitPrice}, Prev: ₹${previousPrice}, Curr: ₹${currentPrice}`);
 
-                    // Log the execution
-                    const lotSize = getLotSize(trade.symbol, trade.market_type);
-                    const lotsVal = trade.qty / lotSize;
-                    const matchedLog = buildTradeLog('LIMIT_MATCHED', {
-                        username: trade.username,
-                        userId: trade.user_id,
-                        side: trade.type,
-                        lots: lotsVal,
-                        symbol: trade.symbol,
-                        limitPrice: limitPrice
-                    });
-                    await logAction(trade.user_id, 'EXECUTE_PENDING', 'trades', matchedLog);
+                // Execute pending order netting using limitPrice so entry_price/Avg Price = limitPrice
+                const res = await tradeService.executePendingOrderNetting(trade.id, limitPrice, currentPrice);
 
-                    // Notify user via Socket
-                    const io = getIo();
-                    if (io) {
-                        const remainingQty = res.nettingRes?.remainingQty;
-                        if (remainingQty === undefined || remainingQty > 0) {
-                            io.to(`user:${trade.user_id}`).emit('notification', {
-                                message: `Pending ${trade.type} order for ${cleanSymbol} executed successfully at ₹${limitPrice}${remainingQty !== undefined ? ` (remaining open: ${remainingQty})` : ''}`,
-                                type: 'ORDER_EXECUTED',
-                                tradeId: trade.id
-                            });
+                // Update last_market_price on executed trade
+                await db.execute('UPDATE trades SET last_market_price = ? WHERE id = ?', [currentPrice, trade.id]);
 
-                            io.to(`user:${trade.user_id}`).emit('trade_update', {
-                                id: trade.id,
-                                is_pending: 0,
-                                status: 'OPEN',
-                                qty: remainingQty
-                            });
-                        }
+                // Log execution
+                const lotSize = getLotSize(trade.symbol, trade.market_type);
+                const lotsVal = trade.qty / lotSize;
+                const matchedLog = buildTradeLog('LIMIT_MATCHED', {
+                    username: trade.username,
+                    userId: trade.user_id,
+                    side: trade.type,
+                    lots: lotsVal,
+                    symbol: trade.symbol,
+                    limitPrice: limitPrice
+                });
+                await logAction(trade.user_id, 'EXECUTE_PENDING', 'trades', matchedLog);
+
+                // Socket notification
+                const io = getIo();
+                if (io) {
+                    const remainingQty = res.nettingRes?.remainingQty;
+                    if (remainingQty === undefined || remainingQty > 0) {
+                        io.to(`user:${trade.user_id}`).emit('notification', {
+                            message: `Pending ${trade.type} order for ${cleanSymbol} executed successfully at limit ₹${limitPrice}${remainingQty !== undefined ? ` (remaining open: ${remainingQty})` : ''}`,
+                            type: 'ORDER_EXECUTED',
+                            tradeId: trade.id
+                        });
+
+                        io.to(`user:${trade.user_id}`).emit('trade_update', {
+                            id: trade.id,
+                            is_pending: 0,
+                            status: 'OPEN',
+                            qty: remainingQty
+                        });
                     }
                 }
             } catch (tradeErr) {
@@ -113,19 +134,16 @@ const monitorPendingOrders = async () => {
 };
 
 let isMonitoring = false;
-/**
- * Start the monitoring service
- * Checks every 3 seconds for price matches
- */
+
 const startPendingOrderMonitoring = () => {
     setInterval(() => {
         if (isMonitoring) return;
         isMonitoring = true;
         monitorPendingOrders()
             .finally(() => { isMonitoring = false; });
-    }, 3000);
+    }, 1000); // Check every 1s interval
 
-    console.log('[PendingOrder] 🚀 Pending order matching service started (3s interval)');
+    console.log('[PendingOrder] 🚀 Pending order matching service started (1s interval)');
 };
 
 module.exports = { startPendingOrderMonitoring };
