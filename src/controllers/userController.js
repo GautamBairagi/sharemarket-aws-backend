@@ -942,7 +942,7 @@ const getWeeklyBalance = async (req, res) => {
     try {
         const userId = req.params.id;
         const { getWeekBoundaries, getISTDate } = require('../services/WeeklySettlementService');
-        const boundaries = getWeekBoundaries(getISTDate());
+        const { week_start, week_end } = getWeekBoundaries(getISTDate());
         // 1. First check weekly_settlements table for latest completed settlement
         const [settlementRows] = await db.execute(
             'SELECT * FROM weekly_settlements WHERE user_id = ? AND settlement_status = "COMPLETED" ORDER BY week_end_date DESC LIMIT 1',
