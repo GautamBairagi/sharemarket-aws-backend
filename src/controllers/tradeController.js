@@ -1776,13 +1776,18 @@ const getActivePositions = async (req, res) => {
                 SUM(t.actual_qty) AS total_qty,
                 SUM(COALESCE(t.qty_input, t.qty, 0)) AS total_lots,
                 AVG(t.entry_price) AS avg_price,
-                MAX(COALESCE(t.lot_size_at_entry, sd.lot_size, 1)) AS lot_size,
+                MAX(COALESCE(t.lot_size_at_entry, st.lot_size, cfl.lot_size, sd.lot_size, 1)) AS lot_size,
                 SUM(CASE WHEN t.status = 'HOLD' OR t.is_carried_forward = 1 THEN COALESCE(t.qty_input, t.qty, 0) ELSE 0 END) AS hold_lots,
                 SUM(CASE WHEN t.status = 'OPEN' AND COALESCE(t.is_carried_forward, 0) = 0 THEN COALESCE(t.qty_input, t.qty, 0) ELSE 0 END) AS open_lots,
                 MAX(t.status) AS status,
                 MAX(t.is_carried_forward) AS is_carried_forward,
                 COUNT(*) AS trade_count
             FROM trades t
+            LEFT JOIN script_testing st
+                ON UPPER(t.symbol) = CONCAT('NFO:', UPPER(st.tradingsymbol))
+                OR UPPER(t.symbol) = UPPER(st.tradingsymbol)
+            LEFT JOIN commodity_forex_crypto_lot_sizes cfl
+                ON UPPER(t.symbol) = UPPER(cfl.symbol)
             LEFT JOIN scrip_data sd ON t.symbol = sd.symbol
             WHERE t.status IN ('OPEN', 'HOLD')
               AND t.is_pending = 0
@@ -1889,7 +1894,31 @@ const getActivePositions = async (req, res) => {
 const getTrades = async (req, res) => {
     const { status, user_id } = req.query; // OPEN, CLOSED, DELETED, CANCELLED
     try {
-        let query = 'SELECT t.*, u.username, u.full_name, sd.lot_size, uc.username as created_by_name FROM trades t JOIN users u ON t.user_id = u.id LEFT JOIN users uc ON t.created_by = uc.id LEFT JOIN scrip_data sd ON t.symbol = sd.symbol WHERE 1=1';
+        // lot_size priority:
+        //   1. trades.lot_size_at_entry  → saved at trade creation (most accurate)
+        //   2. script_testing.lot_size   → NFO FUT/OPT live from Zerodha API
+        //   3. commodity_forex_crypto_lot_sizes.lot_size → COMEX / FOREX / CRYPTO
+        //   4. scrip_data.lot_size       → fallback legacy
+        //   MCX lot sizes are handled on frontend via hardcoded MCX_LOT_SIZES table
+        let query = `SELECT t.*,
+            u.username, u.full_name,
+            uc.username as created_by_name,
+            COALESCE(
+                t.lot_size_at_entry,
+                st.lot_size,
+                cfl.lot_size,
+                sd.lot_size
+            ) AS lot_size
+            FROM trades t
+            JOIN users u ON t.user_id = u.id
+            LEFT JOIN users uc ON t.created_by = uc.id
+            LEFT JOIN script_testing st
+                ON UPPER(t.symbol) = CONCAT('NFO:', UPPER(st.tradingsymbol))
+                OR UPPER(t.symbol) = UPPER(st.tradingsymbol)
+            LEFT JOIN commodity_forex_crypto_lot_sizes cfl
+                ON UPPER(t.symbol) = UPPER(cfl.symbol)
+            LEFT JOIN scrip_data sd ON t.symbol = sd.symbol
+            WHERE 1=1`;
         const params = [];
 
         if (status) {
@@ -1913,6 +1942,12 @@ const getTrades = async (req, res) => {
             if (isPending === 1 && !status) {
                 query += " AND t.status = 'OPEN'";
             }
+        }
+
+        if (req.query.current_week_only === 'true' || req.query.current_week_only === '1' || req.query.currentWeekOnly === 'true') {
+            const { getWeekBoundaries, getISTDate } = require('../services/WeeklySettlementService');
+            const { week_start } = getWeekBoundaries(getISTDate());
+            query += ` AND DATE(COALESCE(t.exit_time, t.entry_time)) >= '${week_start}'`;
         }
 
         // Filter by specific user_id (for client detail views)
@@ -2026,8 +2061,8 @@ const getTrades = async (req, res) => {
                     trade.margin_used = calc;
                     trade.holding_margin = calc;
 
-                    // Calculate P/L dynamically for OPEN trades only if pnl is 0/null
-                    if (trade.status === 'OPEN' && (!trade.pnl || parseFloat(trade.pnl) === 0)) {
+                    // Calculate P/L dynamically for OPEN/HOLD trades
+                    if ((trade.status === 'OPEN' || trade.status === 'HOLD') && (!trade.pnl || parseFloat(trade.pnl) === 0)) {
                         const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
                         const prefixForPnl = trade.market_type === 'EQUITY' ? 'NSE' : (trade.market_type === 'OPTIONS' ? 'NFO' : trade.market_type);
                         const possibleSymbols = [trade.symbol, `${prefixForPnl}:${cleanSymbol}`, cleanSymbol];
@@ -2042,9 +2077,13 @@ const getTrades = async (req, res) => {
                         }
 
                         if (currentPrice) {
+                            const baselinePrice = (trade.is_carried_forward || trade.status === 'HOLD') && trade.last_settlement_price !== null && trade.last_settlement_price !== undefined
+                                ? parseFloat(trade.last_settlement_price)
+                                : parseFloat(trade.entry_price);
+
                             const commodityLotService = require('../services/CommodityLotService');
                             if (commodityLotService.isCommodityScrip(trade.symbol, trade.market_type)) {
-                                const calc = commodityLotService.calculatePnL(trade.symbol, trade.type, trade.entry_price, currentPrice, trade.qty);
+                                const calc = commodityLotService.calculatePnL(trade.symbol, trade.type, baselinePrice, currentPrice, trade.qty);
                                 trade.pnl = calc.pnlInr;
                                 // Send the base rate (divide out the 10% adjustment) so the
                                 // mobile app can apply the 10% rule itself based on P/L direction.
@@ -2058,12 +2097,11 @@ const getTrades = async (req, res) => {
                                 const lotSize = parseFloat(trade.lot_size_at_entry || trade.lot_size || 1);
                                 const effectiveLotSize = (trade.trade_mode === 'UNITS' || trade.equity_units_mode === 1) ? 1 : lotSize;
                                 const qtyForPnl = trade.qty * effectiveLotSize;
-                                const entryPrice = parseFloat(trade.entry_price);
 
                                 if (trade.type === 'BUY') {
-                                    trade.pnl = (currentPrice - entryPrice) * qtyForPnl;
+                                    trade.pnl = (currentPrice - baselinePrice) * qtyForPnl;
                                 } else {
-                                    trade.pnl = (entryPrice - currentPrice) * qtyForPnl;
+                                    trade.pnl = (baselinePrice - currentPrice) * qtyForPnl;
                                 }
                             }
                         }
@@ -2072,6 +2110,87 @@ const getTrades = async (req, res) => {
             }
         }
 
+
+        // Include Weekly Settlement Items for Closed Trades view
+        if (statusUpper === 'CLOSED' || !statusUpper || statusUpper === 'WEEKLY SETTLED' || statusUpper === 'SETTLED') {
+            try {
+                let wsiQuery = `
+                    SELECT wsi.*,
+                           u.username, u.full_name,
+                           ws.week_start_date, ws.week_end_date
+                    FROM weekly_settlement_items wsi
+                    JOIN users u ON wsi.user_id = u.id
+                    JOIN weekly_settlements ws ON wsi.settlement_id = ws.id
+                    WHERE 1=1
+                `;
+                const wsiParams = [];
+
+                if (user_id) {
+                    wsiQuery += ' AND wsi.user_id = ?';
+                    wsiParams.push(user_id);
+                } else if (req.user && req.user.role !== 'TRADER') {
+                    wsiQuery += ' AND u.is_demo = 0';
+                }
+
+                if (req.user) {
+                    if (req.user.role === 'ADMIN') {
+                        wsiQuery += ` AND (wsi.user_id IN (
+                            SELECT u.id FROM users u 
+                            LEFT JOIN client_settings cs ON u.id = cs.user_id
+                            WHERE u.parent_id = ? OR cs.broker_id IN (SELECT id FROM users WHERE parent_id = ?)
+                        ))`;
+                        wsiParams.push(req.user.id, req.user.id);
+                    } else if (req.user.role === 'BROKER') {
+                        wsiQuery += ` AND (wsi.user_id IN (
+                            SELECT u.id FROM users u 
+                            LEFT JOIN client_settings cs ON u.id = cs.user_id 
+                            WHERE u.parent_id = ? OR cs.broker_id = ?
+                        ))`;
+                        wsiParams.push(req.user.id, req.user.id);
+                    } else if (req.user.role === 'TRADER') {
+                        wsiQuery += ' AND wsi.user_id = ?';
+                        wsiParams.push(req.user.id);
+                    }
+                }
+
+                if (req.query.fromDate) {
+                    wsiQuery += ' AND DATE(wsi.created_at) >= ?';
+                    wsiParams.push(req.query.fromDate);
+                }
+                if (req.query.toDate) {
+                    wsiQuery += ' AND DATE(wsi.created_at) <= ?';
+                    wsiParams.push(req.query.toDate);
+                }
+
+                const [wsiRows] = await db.execute(wsiQuery, wsiParams);
+                const wsiMapped = wsiRows.map(item => ({
+                    id: `WS-${item.id}`,
+                    trade_id: item.trade_id,
+                    user_id: item.user_id,
+                    username: item.username,
+                    full_name: item.full_name,
+                    symbol: item.symbol,
+                    type: item.type,
+                    qty: item.qty,
+                    lot_size: item.lot_size || 1,
+                    lot_size_at_entry: item.lot_size || 1,
+                    entry_price: parseFloat(item.original_entry_price || 0),
+                    exit_price: parseFloat(item.settlement_price || 0),
+                    pnl: parseFloat(item.settled_pnl || 0),
+                    brokerage: 0,
+                    status: 'WEEKLY SETTLED',
+                    is_weekly_settlement: true,
+                    entry_time: item.created_at,
+                    exit_time: item.created_at,
+                    created_at: item.created_at
+                }));
+
+                rows.push(...wsiMapped);
+                rows.sort((a, b) => new Date(b.exit_time || b.entry_time || b.created_at) - new Date(a.exit_time || a.entry_time || a.created_at));
+            } catch (wsiErr) {
+                console.error('[getTrades] Error fetching weekly_settlement_items:', wsiErr);
+            }
+        }
 
         res.json(rows);
 

@@ -519,20 +519,24 @@ const getClientLiveM2M = async (req, res) => {
                     }
                 }
 
+                const baselinePrice = (trade.is_carried_forward || trade.status === 'HOLD') && trade.last_settlement_price !== null && trade.last_settlement_price !== undefined
+                    ? parseFloat(trade.last_settlement_price)
+                    : entryPrice;
+
                 // Use BID for BUY trades (exit by selling), ASK for SELL trades
                 const exitPrice = isBuy
-                    ? (liveData?.bid || liveData?.ltp || entryPrice)
-                    : (liveData?.ask || liveData?.ltp || entryPrice);
+                    ? (liveData?.bid || liveData?.ltp || baselinePrice)
+                    : (liveData?.ask || liveData?.ltp || baselinePrice);
 
                 let unrealizedPnl = 0;
                 const commodityLotService = require('../services/CommodityLotService');
                 if (commodityLotService.isCommodityScrip(trade.symbol, mType)) {
-                    const calc = commodityLotService.calculatePnL(trade.symbol, trade.type, entryPrice, exitPrice, qty);
+                    const calc = commodityLotService.calculatePnL(trade.symbol, trade.type, baselinePrice, exitPrice, qty);
                     unrealizedPnl = calc.pnlInr;
                 } else {
                     unrealizedPnl = isBuy
-                        ? (exitPrice - entryPrice) * totalUnits
-                        : (entryPrice - exitPrice) * totalUnits;
+                        ? (exitPrice - baselinePrice) * totalUnits
+                        : (baselinePrice - exitPrice) * totalUnits;
                 }
 
                 // ✅ FIX: Calculate marginUsed dynamically using segment-aware config
@@ -965,9 +969,13 @@ module.exports = {
                 } catch (_) { }
 
                 let pnl = 0;
+                const baselinePrice = (trade.is_carried_forward || trade.status === 'HOLD') && trade.last_settlement_price !== null && trade.last_settlement_price !== undefined
+                    ? parseFloat(trade.last_settlement_price)
+                    : parseFloat(trade.entry_price);
+
                 const commodityLotService = require('../services/CommodityLotService');
                 if (commodityLotService.isCommodityScrip(trade.symbol, trade.market_type)) {
-                    const calc = commodityLotService.calculatePnL(trade.symbol, trade.type, trade.entry_price, currentPrice, trade.qty);
+                    const calc = commodityLotService.calculatePnL(trade.symbol, trade.type, baselinePrice, currentPrice, trade.qty);
                     pnl = calc.pnlInr;
                 } else {
                     const baseSymbol = Object.keys(INSTRUMENT_META).find(key =>
@@ -976,8 +984,8 @@ module.exports = {
                     const multiplier = baseSymbol ? INSTRUMENT_META[baseSymbol] : 1;
 
                     pnl = trade.type === 'BUY'
-                        ? (currentPrice - trade.entry_price) * trade.qty * multiplier
-                        : (trade.entry_price - currentPrice) * trade.qty * multiplier;
+                        ? (currentPrice - baselinePrice) * trade.qty * multiplier
+                        : (baselinePrice - currentPrice) * trade.qty * multiplier;
                 }
 
                 if (traderM2M[trade.user_id]) {

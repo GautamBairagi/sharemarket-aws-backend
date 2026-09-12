@@ -42,19 +42,19 @@ function getWeekBoundaries(targetDate = new Date()) {
 /**
  * Process settlement for a single trader within a dedicated transaction
  */
-async function processTraderSettlement({ userId, username, weekStart, weekEnd, settledByUserId = null }) {
+async function processTraderSettlement({ userId, username, weekStart, weekEnd, settledByUserId = null, force = false }) {
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
 
-        // 1. Idempotency Check: Don't re-run if already COMPLETED for this week
+        // 1. Idempotency Check: Don't re-run if already COMPLETED for this week unless force=true
         const [existing] = await connection.execute(
-            `SELECT id, settlement_status FROM weekly_settlements 
+            `SELECT id, settlement_status, unrealized_mtm_pnl FROM weekly_settlements 
              WHERE user_id = ? AND week_start_date = ? AND week_end_date = ?`,
             [userId, weekStart, weekEnd]
         );
 
-        if (existing.length > 0 && existing[0].settlement_status === 'COMPLETED') {
+        if (!force && existing.length > 0 && existing[0].settlement_status === 'COMPLETED') {
             console.log(`[WeeklySettlement] User #${userId} (${username}) already settled for ${weekStart} to ${weekEnd}. Skipping.`);
             await connection.rollback();
             return {
@@ -76,7 +76,24 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
         }
 
         const user = userRows[0];
-        const currentBalance = parseFloat(user.balance || 0);
+        let currentBalance = parseFloat(user.balance || 0);
+
+        // ✅ FORCE RE-RUN FIX: If forcing a re-run on an already-completed settlement,
+        // reverse the old MTM that was applied to balance, then recalculate fresh.
+        if (force && existing.length > 0 && existing[0].settlement_status === 'COMPLETED') {
+            const oldMtm = parseFloat(existing[0].unrealized_mtm_pnl || 0);
+            if (oldMtm !== 0) {
+                currentBalance = currentBalance - oldMtm; // Reverse old MTM adjustment
+                console.log(`🔄 [WeeklySettlement] Force re-run for #${userId}: reversing old MTM ₹${oldMtm} from balance. Adjusted base = ₹${currentBalance}`);
+            }
+            // Reset last_settlement_price for HOLD trades from this week's settlement
+            // so MTM recalculates from entry_price (clean baseline)
+            await connection.execute(
+                `UPDATE trades SET last_settlement_price = NULL, accumulated_settled_pnl = 0
+                 WHERE user_id = ? AND status = 'HOLD' AND settlement_id = ?`,
+                [userId, existing[0].id]
+            );
+        }
 
         // Fetch client settings for margin config
         const [settingRows] = await connection.execute(
@@ -128,6 +145,7 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
         const realizedPnl = parseFloat(tradeTotals[0]?.realized_pnl || 0);
         const brokerage = parseFloat(tradeTotals[0]?.total_brokerage || 0);
         const charges = parseFloat(tradeTotals[0]?.total_swap || 0);
+        console.log(`📊 [WeeklySettlement DEBUG] User #${userId} Week ${weekStart}→${weekEnd}: closedTrades realizedPnl=₹${realizedPnl}, brokerage=₹${brokerage}, charges=₹${charges}`);
 
         // 5. Calculate Deposits & Withdrawals for the week
         const [fundTotals] = await connection.execute(
@@ -162,106 +180,112 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
         let totalUnrealizedMtmPnl = 0;
         const carriedForwardItems = [];
 
+        console.log(`🔍 [WeeklySettlement DEBUG] User #${userId}: Found ${openTrades.length} open/hold trade(s). currentBalance=₹${currentBalance}`);
+
         for (const trade of openTrades) {
-            let requiredMargin = parseFloat(trade.margin_used || 0);
+            const marketDataService = require('./MarketDataService');
+            const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
+            const marketType = (trade.market_type || 'MCX').toUpperCase();
+            const prefix = marketType === 'EQUITY' ? 'NSE' : (marketType === 'OPTIONS' ? 'NFO' : marketType);
 
-            // If margin_used is 0, calculate required holding margin using MarginService
-            if (requiredMargin <= 0) {
+            let liveData = null;
+            try {
+                liveData = marketDataService.getPrice(trade.symbol) ||
+                    marketDataService.getPrice(`${prefix}:${cleanSymbol}`) ||
+                    marketDataService.getPrice(cleanSymbol);
+            } catch (_) { }
+
+            let priceSource = 'fallback_entry';
+            let settlementPrice = (liveData && liveData.ltp)
+                ? (priceSource = 'live_ltp', parseFloat(liveData.ltp))
+                : parseFloat(trade.current_price || trade.exit_price || trade.entry_price || 0);
+
+            if (!liveData || !liveData.ltp) {
                 try {
-                    const marginConfig = MarginService.getMarginConfig(
-                        trade.symbol,
-                        trade.market_type || 'MCX',
-                        clientConfig,
-                        trade.margin_type
+                    const [scripRows] = await connection.execute(
+                        `SELECT last_price FROM scrip_data WHERE symbol = ? OR symbol = ? LIMIT 1`,
+                        [trade.symbol, cleanSymbol]
                     );
-                    requiredMargin = MarginService.calculateRequiredMargin({
-                        qty: trade.qty,
-                        price: trade.entry_price,
-                        marginConfig,
-                        tradeType: 'HOLDING',
-                        lotSize: trade.lot_size || 1
-                    });
-                } catch (e) {
-                    requiredMargin = parseFloat(trade.entry_price || 0) * parseFloat(trade.qty || 1);
-                }
+                    if (scripRows.length > 0 && parseFloat(scripRows[0].last_price) > 0) {
+                        settlementPrice = parseFloat(scripRows[0].last_price);
+                        priceSource = 'scrip_data';
+                    }
+                } catch (_) { }
             }
 
-            const settlementPrice = parseFloat(trade.current_price || trade.exit_price || trade.entry_price || 0);
+            const baselinePrice = (trade.last_settlement_price !== null && trade.last_settlement_price !== undefined)
+                ? parseFloat(trade.last_settlement_price)
+                : parseFloat(trade.entry_price);
+            const baselineSource = (trade.last_settlement_price !== null && trade.last_settlement_price !== undefined)
+                ? 'last_settlement_price' : 'entry_price';
 
-            // Check if user has sufficient margin to hold
-            if (availableHoldingMargin >= requiredMargin) {
-                // CASE A: Sufficient Holding Margin -> Carry Forward (HOLD) with Weekly MTM Settlement (Brokerage ₹0)
-                availableHoldingMargin -= requiredMargin;
+            let weeklyMtmPnl = 0;
+            const commodityLotService = require('./CommodityLotService');
+            const { getMcxBaseScrip, MCX_LOT_SIZES } = require('../utils/symbolHelper');
+            const isCommodity = commodityLotService.isCommodityScrip(trade.symbol, trade.market_type);
 
-                const baselinePrice = (trade.last_settlement_price !== null && trade.last_settlement_price !== undefined)
-                    ? parseFloat(trade.last_settlement_price)
-                    : parseFloat(trade.entry_price);
-
-                const isBuy = (trade.type || 'BUY').toUpperCase() === 'BUY';
-                const lotMult = parseFloat(trade.lot_size || 1);
-                const qtyVal = parseFloat(trade.qty || 1);
-                const weeklyMtmPnl = isBuy 
-                    ? (settlementPrice - baselinePrice) * qtyVal * lotMult
-                    : (baselinePrice - settlementPrice) * qtyVal * lotMult;
-
-                totalUnrealizedMtmPnl += weeklyMtmPnl;
-
-                await connection.execute(
-                    `UPDATE trades 
-                     SET status = 'HOLD',
-                         is_carried_forward = 1,
-                         carry_forward_from_week = ?,
-                         carry_forward_to_week = ?,
-                         settlement_price = ?,
-                         last_settlement_price = ?,
-                         accumulated_settled_pnl = accumulated_settled_pnl + ?
-                     WHERE id = ?`,
-                    [weekEnd, weekStart, settlementPrice, settlementPrice, weeklyMtmPnl, trade.id]
-                );
-
-                carriedForwardItems.push({
-                    tradeId: trade.id,
-                    symbol: trade.symbol,
-                    type: trade.type,
-                    qty: trade.qty,
-                    lotSize: trade.lot_size || 1,
-                    originalEntryPrice: parseFloat(trade.entry_price),
-                    settlementPrice,
-                    settledPnl: weeklyMtmPnl,
-                    brokerage: 0
-                });
-
-                carriedForwardCount++;
+            if (isCommodity) {
+                const calc = commodityLotService.calculatePnL(trade.symbol, trade.type, baselinePrice, settlementPrice, trade.qty);
+                weeklyMtmPnl = calc.pnlInr;
+                console.log(`  📦 [Trade #${trade.id}] COMMODITY ${trade.symbol} | type=${trade.type} qty=${trade.qty} | baseline=${baselinePrice}(${baselineSource}) settlementPrice=${settlementPrice}(${priceSource}) | lotSize=${calc.lotSize} pnlUsd=${calc.pnlUsd.toFixed(4)} usdInr=${calc.usdInr} => MTM_INR=₹${weeklyMtmPnl.toFixed(2)}`);
             } else {
-                // CASE B: Insufficient Holding Margin -> Auto Square-off / Settle
-                const exitPrice = settlementPrice;
-                const isBuy = (trade.type || 'BUY').toUpperCase() === 'BUY';
-                const lotMult = parseFloat(trade.lot_size || 1);
-                const qtyVal = parseFloat(trade.qty || 1);
+                // ✅ For MCX: use same MCX_LOT_SIZES as TradeService (not lot_size_at_entry)
+                let lotSize;
+                if (marketType === 'MCX') {
+                    const base = getMcxBaseScrip(trade.symbol);
+                    lotSize = (base && MCX_LOT_SIZES[base]) ? MCX_LOT_SIZES[base] : parseFloat(trade.lot_size_at_entry || trade.lot_size || 1);
+                } else {
+                    lotSize = parseFloat(trade.lot_size_at_entry || trade.lot_size || 1);
+                }
+                const effectiveLotSize = (trade.trade_mode === 'UNITS' || trade.equity_units_mode === 1) ? 1 : lotSize;
+                const qtyForPnl = trade.qty * effectiveLotSize;
 
-                // Full P&L relative to original entry price
-                const pnl = isBuy 
-                    ? (exitPrice - parseFloat(trade.entry_price)) * qtyVal * lotMult
-                    : (parseFloat(trade.entry_price) - exitPrice) * qtyVal * lotMult;
-
-                await connection.execute(
-                    `UPDATE trades 
-                     SET status = 'SETTLED',
-                         exit_price = ?,
-                         exit_time = NOW(),
-                         settlement_price = ?,
-                         settlement_time = NOW(),
-                         pnl = ?
-                     WHERE id = ?`,
-                    [exitPrice, exitPrice, pnl, trade.id]
-                );
-                settledTradesCount++;
+                if ((trade.type || 'BUY').toUpperCase() === 'BUY') {
+                    weeklyMtmPnl = (settlementPrice - baselinePrice) * qtyForPnl;
+                } else {
+                    weeklyMtmPnl = (baselinePrice - settlementPrice) * qtyForPnl;
+                }
+                console.log(`  📈 [Trade #${trade.id}] NON-COMMODITY ${trade.symbol} | type=${trade.type} qty=${trade.qty} | baseline=${baselinePrice}(${baselineSource}) settlementPrice=${settlementPrice}(${priceSource}) | lotSize=${lotSize} effectiveLotSize=${effectiveLotSize} qtyForPnl=${qtyForPnl} trade_mode=${trade.trade_mode} eq_units_mode=${trade.equity_units_mode} => MTM=₹${weeklyMtmPnl.toFixed(2)}`);
             }
+
+            totalUnrealizedMtmPnl += weeklyMtmPnl;
+
+            await connection.execute(
+                `UPDATE trades 
+                 SET status = 'HOLD',
+                     is_carried_forward = 1,
+                     carry_forward_from_week = ?,
+                     carry_forward_to_week = ?,
+                     settlement_price = ?,
+                     last_settlement_price = ?,
+                     accumulated_settled_pnl = accumulated_settled_pnl + ?
+                 WHERE id = ?`,
+                [weekEnd, weekStart, settlementPrice, settlementPrice, weeklyMtmPnl, trade.id]
+            );
+
+            carriedForwardItems.push({
+                tradeId: trade.id,
+                symbol: trade.symbol,
+                type: trade.type,
+                qty: trade.qty,
+                lotSize: trade.lot_size || 1,
+                originalEntryPrice: parseFloat(trade.entry_price),
+                settlementPrice,
+                settledPnl: weeklyMtmPnl,
+                brokerage: 0
+            });
+
+            carriedForwardCount++;
         }
 
-        // Net Week Result & Final Closing Balance including MTM Settlement
+        // Net Week Result & Final Closing Balance
         const netWeekResult = (realizedPnl - brokerage - charges) + totalDeposit - totalWithdrawal + totalUnrealizedMtmPnl;
-        const closingBalance = openingBalance + netWeekResult;
+
+        // Closing Balance: Since realized PnL, brokerage, charges, deposits, and withdrawals were ALREADY 
+        // credited/debited to user.balance in real-time when those events occurred,
+        // Weekly Settlement ONLY adjusts user.balance for the open trade MTM PnL (totalUnrealizedMtmPnl).
+        const closingBalance = currentBalance + totalUnrealizedMtmPnl;
+        console.log(`✅ [WeeklySettlement DEBUG] User #${userId} FINAL: openingBal=₹${openingBalance} currentBal=₹${currentBalance} totalMTM=₹${totalUnrealizedMtmPnl} closingBal=₹${closingBalance}`);
 
         // 7. Insert / Update weekly_settlements Record
         const [settlementResult] = await connection.execute(
@@ -271,7 +295,7 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
                 total_deposit, total_withdrawal, net_week_result, closing_balance,
                 carried_forward_trades_count, settled_trades_count,
                 settlement_status, settled_at, settled_by_user_id, notes
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', NOW(), ?, ?)
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'COMPLETED', NOW(), ?, ?)
              ON DUPLICATE KEY UPDATE
                 opening_balance = VALUES(opening_balance),
                 realized_pnl = VALUES(realized_pnl),
@@ -283,7 +307,7 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
                 net_week_result = VALUES(net_week_result),
                 closing_balance = VALUES(closing_balance),
                 carried_forward_trades_count = VALUES(carried_forward_trades_count),
-                settled_trades_count = VALUES(settled_trades_count),
+                settled_trades_count = 0,
                 settlement_status = 'COMPLETED',
                 settled_at = NOW(),
                 settled_by_user_id = VALUES(settled_by_user_id),
@@ -292,7 +316,7 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
                 userId, weekStart, weekEnd,
                 openingBalance, realizedPnl, totalUnrealizedMtmPnl, brokerage, charges,
                 totalDeposit, totalWithdrawal, netWeekResult, closingBalance,
-                carriedForwardCount, settledTradesCount,
+                carriedForwardCount,
                 settledByUserId,
                 `Weekly Settlement (${weekStart} to ${weekEnd})`
             ]
@@ -333,24 +357,43 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
             }
         }
 
-        // 8. Update User's Balance and create Ledger Transaction Audit Trail
+        // 8. Update User's Balance and create Ledger Transaction Audit Trail for MTM PnL
         await connection.execute(
             `UPDATE users SET balance = ? WHERE id = ?`,
             [closingBalance, userId]
         );
 
+        const remarksText = `Weekly Settlement ${weekStart} to ${weekEnd} | MTM PnL: ₹${totalUnrealizedMtmPnl.toFixed(2)}`;
+
+        // ✅ Delete all stale WEEKLY_SETTLEMENT ledger entries for this user+week before inserting fresh
+        // Match by week dates in remarks (covers all old runs regardless of reference_id)
         await connection.execute(
-            `INSERT INTO ledger (user_id, amount, type, balance_before, balance_after, reference_id, reference_type, remarks, created_at)
-             VALUES (?, ?, 'WEEKLY_SETTLEMENT', ?, ?, ?, 'WEEKLY_SETTLEMENT', ?, NOW())`,
-            [
-                userId,
-                netWeekResult,
-                openingBalance,
-                closingBalance,
-                String(settlementId),
-                `Weekly Settlement for period ${weekStart} to ${weekEnd} (Realized PnL: ₹${realizedPnl.toFixed(2)}, MTM PnL: ₹${totalUnrealizedMtmPnl.toFixed(2)}, Brokerage: ₹${brokerage.toFixed(2)})`
-            ]
+            `DELETE FROM ledger 
+             WHERE user_id = ? AND reference_type = 'WEEKLY_SETTLEMENT' 
+               AND remarks LIKE ?`,
+            [userId, `%${weekStart}%${weekEnd}%`]
         );
+        // Also clean up any reference_id='0' orphan entries
+        await connection.execute(
+            `DELETE FROM ledger WHERE user_id = ? AND reference_type = 'WEEKLY_SETTLEMENT' AND (reference_id = '0' OR reference_id = '')`,
+            [userId]
+        );
+
+        // Insert fresh clean ledger entry — skip if MTM PnL is zero (avoids +0.00 noise entries)
+        if (totalUnrealizedMtmPnl !== 0) {
+            await connection.execute(
+                `INSERT INTO ledger (user_id, amount, type, balance_before, balance_after, reference_id, reference_type, remarks, created_at)
+                 VALUES (?, ?, 'WEEKLY_SETTLEMENT', ?, ?, ?, 'WEEKLY_SETTLEMENT', ?, NOW())`,
+                [
+                    userId,
+                    totalUnrealizedMtmPnl,
+                    currentBalance,
+                    closingBalance,
+                    String(settlementId),
+                    remarksText
+                ]
+            );
+        }
 
         // 9. Sync weekly_balances for backward compatibility
         await connection.execute(
@@ -403,10 +446,21 @@ async function processTraderSettlement({ userId, username, weekStart, weekEnd, s
     }
 }
 
+let isSettlementRunning = false;
+
 /**
  * Main function: Run weekly settlement across all active traders
  */
-async function runWeeklySettlement({ targetDate = new Date(), settledByUserId = null } = {}) {
+async function runWeeklySettlement({ targetDate = new Date(), settledByUserId = null, force = false } = {}) {
+    if (isSettlementRunning) {
+        console.log('[WeeklySettlement] Settlement already in progress. Rejecting concurrent call.');
+        return {
+            success: false,
+            message: 'Weekly Settlement is already in progress. Please wait.'
+        };
+    }
+
+    isSettlementRunning = true;
     const { week_start, week_end } = getWeekBoundaries(getISTDate(targetDate));
     console.log(`\n═════════════════════════════════════════════════════════════════`);
     console.log(`🚀 [WeeklySettlement] Starting Weekly Settlement for Week: ${week_start} to ${week_end}`);
@@ -426,7 +480,8 @@ async function runWeeklySettlement({ targetDate = new Date(), settledByUserId = 
                 username: trader.username,
                 weekStart: week_start,
                 weekEnd: week_end,
-                settledByUserId
+                settledByUserId,
+                force
             });
             results.push(res);
         }
@@ -449,6 +504,8 @@ async function runWeeklySettlement({ targetDate = new Date(), settledByUserId = 
     } catch (err) {
         console.error('[WeeklySettlement] Fatal error in batch runner:', err);
         throw err;
+    } finally {
+        isSettlementRunning = false;
     }
 }
 

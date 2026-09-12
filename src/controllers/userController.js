@@ -14,13 +14,18 @@ const getUsers = async (req, res) => {
 
         console.log(`[getUsers] User ${currentUserId} (${currentUserRole}) requesting users with role filter: ${role || 'all'}, adminId: ${adminId || 'none'}, fromDate: ${fromDate || 'none'}, toDate: ${toDate || 'none'}`);
 
-        // Build date filter for closed trades calculation
+        const { getWeekBoundaries, getISTDate } = require('../services/WeeklySettlementService');
+        const { week_start } = getWeekBoundaries(getISTDate());
+
+        // Build date filter for closed trades calculation (default to Current Active Week)
         let tradeDateFilter = '';
         if (fromDate && /^\d{4}-\d{2}-\d{2}/.test(fromDate)) {
-            tradeDateFilter += ` AND COALESCE(exit_time, entry_time, created_at) >= '${fromDate} 00:00:00'`;
+            tradeDateFilter += ` AND COALESCE(exit_time, entry_time) >= '${fromDate} 00:00:00'`;
+        } else {
+            tradeDateFilter += ` AND DATE(COALESCE(exit_time, entry_time)) >= '${week_start}'`;
         }
         if (toDate && /^\d{4}-\d{2}-\d{2}/.test(toDate)) {
-            tradeDateFilter += ` AND COALESCE(exit_time, entry_time, created_at) <= '${toDate} 23:59:59'`;
+            tradeDateFilter += ` AND COALESCE(exit_time, entry_time) <= '${toDate} 23:59:59'`;
         }
 
         // Try to get from cache first (safe: if fails, continues to DB query)
@@ -46,6 +51,7 @@ const getUsers = async (req, res) => {
                 IFNULL((SELECT SUM(brokerage) FROM trades WHERE user_id = u.id AND status = 'CLOSED'${tradeDateFilter}), 0.00) as brokerage,
                 IFNULL((SELECT SUM(swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'${tradeDateFilter}), 0.00) as swap_charges,
                 IFNULL((SELECT SUM(pnl - brokerage - swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'${tradeDateFilter}), 0.00) as net_pl,
+                (SELECT COUNT(*) FROM trades WHERE user_id = u.id AND status = 'CLOSED'${tradeDateFilter}) as closed_trades_count,
                 (SELECT COUNT(*) FROM trades WHERE user_id = u.id AND status = 'OPEN') as active_trades_count,
                 cs.config_json,
                 cs.broker_id

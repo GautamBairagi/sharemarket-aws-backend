@@ -69,16 +69,20 @@ class RMSService {
                 const liveData = marketDataService.getPrice(trade.symbol);
                 if (!liveData) continue;
 
+                const baselinePrice = (trade.is_carried_forward || trade.status === 'HOLD') && trade.last_settlement_price !== null && trade.last_settlement_price !== undefined
+                    ? parseFloat(trade.last_settlement_price)
+                    : parseFloat(trade.entry_price);
+
                 const currentPrice = trade.type === 'BUY' ? (liveData.bid || liveData.ltp) : (liveData.ask || liveData.ltp);
                 
                 let pnl = 0;
                 if (commodityLotService.isCommodityScrip(trade.symbol, trade.market_type)) {
-                    const calc = commodityLotService.calculatePnL(trade.symbol, trade.type, trade.entry_price, currentPrice, trade.qty);
+                    const calc = commodityLotService.calculatePnL(trade.symbol, trade.type, baselinePrice, currentPrice, trade.qty);
                     pnl = calc.pnlInr;
                 } else {
                     pnl = trade.type === 'BUY'
-                        ? (currentPrice - trade.entry_price) * trade.qty
-                        : (trade.entry_price - currentPrice) * trade.qty;
+                        ? (currentPrice - baselinePrice) * trade.qty
+                        : (baselinePrice - currentPrice) * trade.qty;
                 }
 
                 totalPnL += pnl;

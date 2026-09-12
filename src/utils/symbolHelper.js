@@ -4,7 +4,7 @@
 const getMcxBaseScrip = (symbol) => {
     if (!symbol) return '';
     const s = symbol.split(':').pop().toUpperCase();
-    
+
     // Ordered by length descending to match longest possible prefix first 
     const mcxBases = [
         'GOLDGUINEA', 'GOLDPETAL', 'GOLDM', 'GOLD', 'MGOLD',
@@ -30,23 +30,23 @@ const parseOptionSymbol = (sym) => {
     if (!sym) return null;
     const clean = sym.includes(':') ? sym.split(':')[1] : sym;
     const s = clean.trim().toUpperCase();
-    
+
     const matchType = s.match(/(CE|PE)$/);
     if (!matchType) return null;
     const optionType = matchType[1];
-    
+
     const body = s.slice(0, -2).trim();
-    
+
     const rootMatch = body.match(/^([A-Z]+)/);
     if (!rootMatch) return null;
     const root = rootMatch[1];
-    
+
     const remainder = body.slice(root.length).replace(/[\s\-_]/g, '');
     if (!remainder) return null;
-    
+
     let strike = '';
     let expiry = '';
-    
+
     const monthMatch = remainder.match(/^(\d{2}[A-Z]{3}\d{0,2})(\d+)$/);
     if (monthMatch) {
         expiry = monthMatch[1];
@@ -63,7 +63,7 @@ const parseOptionSymbol = (sym) => {
     } else {
         strike = remainder;
     }
-    
+
     const cleanStrike = parseInt(strike, 10);
     return { root, strike: isNaN(cleanStrike) ? strike : cleanStrike.toString(), optionType, expiry };
 };

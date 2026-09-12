@@ -202,7 +202,24 @@ const getFunds = async (req, res) => {
                         created_at: `${boundaries.week_start} 00:00:00`
                     };
 
-                    rows.unshift(openingEntry);
+                    rows.push(openingEntry);
+                    // Custom Sort:
+                    // 1. New DEPOSIT/WITHDRAW entries stay at the top (newest first)
+                    // 2. OPENING_BALANCE comes ABOVE WEEKLY_SETTLEMENT
+                    // 3. WEEKLY_SETTLEMENT comes BELOW OPENING_BALANCE
+                    rows.sort((a, b) => {
+                        const isOpeningA = a.type === 'OPENING_BALANCE';
+                        const isOpeningB = b.type === 'OPENING_BALANCE';
+                        const isSettleA = a.type === 'WEEKLY_SETTLEMENT' || (a.remarks || '').includes('Weekly Settlement');
+                        const isSettleB = b.type === 'WEEKLY_SETTLEMENT' || (b.remarks || '').includes('Weekly Settlement');
+
+                        if (isOpeningA && isSettleB) return -1;
+                        if (isSettleA && isOpeningB) return 1;
+
+                        const timeA = new Date(a.created_at || 0).getTime();
+                        const timeB = new Date(b.created_at || 0).getTime();
+                        return timeB - timeA;
+                    });
                 }
             } catch (openErr) {
                 console.error('[getFunds] Error attaching opening balance:', openErr.message);

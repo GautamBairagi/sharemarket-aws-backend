@@ -10,10 +10,11 @@ const runSettlementNow = async (req, res) => {
             return res.status(403).json({ success: false, message: 'Access denied. SuperAdmin only.' });
         }
 
-        const { targetDate } = req.body;
+        const { targetDate, force } = req.body;
         const result = await runWeeklySettlement({
             targetDate: targetDate ? new Date(targetDate) : new Date(),
-            settledByUserId: req.user.id
+            settledByUserId: req.user.id,
+            force: force === true || force === 'true' || force === 1
         });
 
         return res.json({

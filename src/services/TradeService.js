@@ -347,9 +347,13 @@ class TradeService {
                 pnl = parseFloat(providedPnl);
                 console.log(`[TradeService] Using provided P/L: ${pnl}`);
             } else {
+                const baselinePrice = (trade.is_carried_forward || trade.status === 'HOLD') && trade.last_settlement_price !== null && trade.last_settlement_price !== undefined
+                    ? parseFloat(trade.last_settlement_price)
+                    : parseFloat(trade.entry_price);
+
                 const commodityLotService = require('./CommodityLotService');
                 if (commodityLotService.isCommodityScrip(trade.symbol, trade.market_type)) {
-                    const calc = commodityLotService.calculatePnL(trade.symbol, trade.type, trade.entry_price, finalExitPrice, trade.qty);
+                    const calc = commodityLotService.calculatePnL(trade.symbol, trade.type, baselinePrice, finalExitPrice, trade.qty);
                     pnl = calc.pnlInr;
                     console.log(`[TradeService] Calculated Commodity P/L: ${pnl} INR (USD: ${calc.pnlUsd}, Lot Size: ${calc.lotSize}, USDINR: ${calc.usdInr})`);
                 } else {
@@ -358,8 +362,8 @@ class TradeService {
                     const effectiveLotSize = (trade.trade_mode === 'UNITS' || trade.equity_units_mode === 1) ? 1 : lotSize;
                     const qtyForPnl = trade.qty * effectiveLotSize;
                     pnl = trade.type === 'BUY'
-                        ? (finalExitPrice - trade.entry_price) * qtyForPnl
-                        : (trade.entry_price - finalExitPrice) * qtyForPnl;
+                        ? (finalExitPrice - baselinePrice) * qtyForPnl
+                        : (baselinePrice - finalExitPrice) * qtyForPnl;
                     console.log(`[TradeService] Calculated P/L using qty×lotSize (${trade.qty}×${lotSize}): ${pnl}`);
                 }
             }
@@ -854,18 +858,21 @@ class TradeService {
             );
             const lotSize = calcRes.lotSize;
             
-            let pnl = 0;
+            const baselinePrice = (oppositeTrade.is_carried_forward || oppositeTrade.status === 'HOLD') && oppositeTrade.last_settlement_price !== null && oppositeTrade.last_settlement_price !== undefined
+                ? parseFloat(oppositeTrade.last_settlement_price)
+                : parseFloat(oppositeTrade.entry_price);
+
             const commodityLotService = require('./CommodityLotService');
             if (commodityLotService.isCommodityScrip(oppositeTrade.symbol, oppositeTrade.market_type)) {
-                const calc = commodityLotService.calculatePnL(oppositeTrade.symbol, oppositeTrade.type, oppositeTrade.entry_price, exitPrice, closeQty);
+                const calc = commodityLotService.calculatePnL(oppositeTrade.symbol, oppositeTrade.type, baselinePrice, exitPrice, closeQty);
                 pnl = calc.pnlInr;
             } else {
                 const effectiveLotSize = (oppositeTrade.trade_mode === 'UNITS' || oppositeTrade.equity_units_mode === 1) ? 1 : lotSize;
                 const qtyForPnl = closeQty * effectiveLotSize;
                 if (oppositeTrade.type === 'BUY') {
-                    pnl = (exitPrice - oppositeTrade.entry_price) * qtyForPnl;
+                    pnl = (exitPrice - baselinePrice) * qtyForPnl;
                 } else {
-                    pnl = (oppositeTrade.entry_price - exitPrice) * qtyForPnl;
+                    pnl = (baselinePrice - exitPrice) * qtyForPnl;
                 }
             }
 
