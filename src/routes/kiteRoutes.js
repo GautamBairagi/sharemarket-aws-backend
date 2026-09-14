@@ -6,6 +6,28 @@ const kiteService = require('../utils/kiteService');
 const kiteTicker = require('../utils/kiteTicker');
 const kiteAuthService = require('../services/KiteAuthService');
 const { authMiddleware } = require('../middleware/auth');
+const { getUserBannedScripsStatus } = require('../utils/bannedHelper');
+const { getClientAllowedSegments, isScripSegmentAllowed } = require('../utils/segmentPermissionHelper');
+
+function checkSymbolHidden(sym, hideSet) {
+    if (!sym || !hideSet || hideSet.size === 0) return false;
+    const cleanSym = sym.includes(':') ? sym.split(':')[1] : sym;
+    for (const h of hideSet) {
+        const cleanH = h.includes(':') ? h.split(':')[1] : h;
+        if (h === sym || cleanH === cleanSym) return true;
+    }
+    return false;
+}
+
+function checkSymbolMarked(sym, markSet) {
+    if (!sym || !markSet || markSet.size === 0) return false;
+    const cleanSym = sym.includes(':') ? sym.split(':')[1] : sym;
+    for (const m of markSet) {
+        const cleanM = m.includes(':') ? m.split(':')[1] : m;
+        if (m === sym || cleanM === cleanSym) return true;
+    }
+    return false;
+}
 
 const router = express.Router();
 
@@ -57,7 +79,7 @@ let fetchingPromise = null;
 
 async function getInstrumentsFromCache() {
     const now = Date.now();
-    
+
     // 1. If we have a valid cache, return it
     if (instrumentsCache && (now - instrumentsCacheTime) < CACHE_TTL) {
         return instrumentsCache;
@@ -75,31 +97,31 @@ async function getInstrumentsFromCache() {
             const instruments = await kiteService.getInstruments();
 
 
-    // 1. Rebuild basic mapping
-    const newMap = new Map();
-    // 2. Rebuild optimized index
-    const newIndex = {
-        NSE: { STOCKS: [], FUT: [], OPT: [] },
-        NFO: { FUT: [], OPT: [] },
-        MCX: { FUT: [], OPT: [] }
-    };
+            // 1. Rebuild basic mapping
+            const newMap = new Map();
+            // 2. Rebuild optimized index
+            const newIndex = {
+                NSE: { STOCKS: [], FUT: [], OPT: [] },
+                NFO: { FUT: [], OPT: [] },
+                MCX: { FUT: [], OPT: [] }
+            };
 
-    instruments.forEach(inst => {
-        const fullKey = `${inst.exchange}:${inst.tradingsymbol}`;
-        newMap.set(fullKey, inst.instrument_token);
+            instruments.forEach(inst => {
+                const fullKey = `${inst.exchange}:${inst.tradingsymbol}`;
+                newMap.set(fullKey, inst.instrument_token);
 
-        const ex = inst.exchange;
-        const type = inst.instrument_type;
-        if (newIndex[ex]) {
-            if (type === 'EQ' || type === 'STK') {
-                if (ex === 'NSE') newIndex.NSE.STOCKS.push(inst);
-            } else if (type === 'FUT') {
-                newIndex[ex].FUT.push(inst);
-            } else if (type === 'CE' || type === 'PE') {
-                newIndex[ex].OPT.push(inst);
-            }
-        }
-    });
+                const ex = inst.exchange;
+                const type = inst.instrument_type;
+                if (newIndex[ex]) {
+                    if (type === 'EQ' || type === 'STK') {
+                        if (ex === 'NSE') newIndex.NSE.STOCKS.push(inst);
+                    } else if (type === 'FUT') {
+                        newIndex[ex].FUT.push(inst);
+                    } else if (type === 'CE' || type === 'PE') {
+                        newIndex[ex].OPT.push(inst);
+                    }
+                }
+            });
 
             symbolTokenMap = newMap;
             indexedInstruments = newIndex;
@@ -163,7 +185,7 @@ async function loadGroupsFromDb() {
         MCX_BASES = Array.from(new Set([...(groups['MCX FUTURES'] || []), 'MGOLD', 'MCRUDEOIL', 'MSILVER', 'MNATURALGAS', 'MCOPPER', 'MLEAD', 'MZINC', 'MALUMINIUM']));
         NFO_INDICES = groups['NFO INDICES'] || [];
         NSE_INDICES = (groups['NSE INDICES'] || []).map(s => `NSE:${s}`);
-        
+
         ALL_NSE_STOCKS = [...new Set([...NIFTY50, ...BANKNIFTY, ...MIDCAP, ...FINNIFTY])];
 
         console.log(`✅ Loaded Market Groups from DB: N50(${NIFTY50.length}), BN(${BANKNIFTY.length}), MCX(${MCX_BASES.length}), INDICES(${NSE_INDICES.length})`);
@@ -575,16 +597,16 @@ async function buildKiteDashboardPayload(userId) {
     }
 
     const marketDataService = require('../services/MarketDataService');
-    marketDataService.init(userId).catch(() => {});
+    marketDataService.init(userId).catch(() => { });
 
     const instruments = await getInstrumentsFromCache();
 
     // 1. Basic Symbols (Stocks + Indices)
     const nseStocks = ALL_NSE_STOCKS.map(s => `NSE:${s}`);
     const nseIndices = NSE_INDICES.length > 0 ? NSE_INDICES : ['NSE:NIFTY 50', 'NSE:NIFTY BANK', 'NSE:NIFTY FIN SERVICE', 'NSE:NIFTY MID SELECT'];
-    
+
     // 2. Futures (from background cache)
-    if (!dashboardSymbolsCache) await refreshDashboardSymbols().catch(() => {});
+    if (!dashboardSymbolsCache) await refreshDashboardSymbols().catch(() => { });
     const mcxFutSymbols = dashboardSymbolsCache?.mcxSymbols || [];
     const nfoFutSymbols = dashboardSymbolsCache?.nfoSymbols || [];
 
@@ -594,28 +616,28 @@ async function buildKiteDashboardPayload(userId) {
     const spotQuotes = await kiteService.getQuote(spotKeys).catch(() => ({}));
 
     const dynamicOptions = [];
-    
+
     // NFO ATM Options (±5 strikes)
     for (const underlying of NFO_INDEX_OPTION_UNDERLYINGS) {
         const step = getOptionStrikeStepNfo(underlying);
-        const idxKey = 
-            underlying === 'NIFTY' ? 'NSE:NIFTY 50' : 
-            underlying === 'BANKNIFTY' ? 'NSE:NIFTY BANK' : 
-            underlying === 'FINNIFTY' ? 'NSE:NIFTY FIN SERVICE' : 
-            underlying === 'MIDCPNIFTY' ? 'NSE:NIFTY MID SELECT' : 
-            `NSE:${underlying}`;
+        const idxKey =
+            underlying === 'NIFTY' ? 'NSE:NIFTY 50' :
+                underlying === 'BANKNIFTY' ? 'NSE:NIFTY BANK' :
+                    underlying === 'FINNIFTY' ? 'NSE:NIFTY FIN SERVICE' :
+                        underlying === 'MIDCPNIFTY' ? 'NSE:NIFTY MID SELECT' :
+                            `NSE:${underlying}`;
         const ltp = spotQuotes[idxKey]?.last_price || 0;
         if (!ltp || !step) continue;
 
         const atm = Math.round(ltp / step) * step;
         const strikes = [atm - 2 * step, atm - step, atm, atm + step, atm + 2 * step];
-        
+
         const nearestOpt = pickNearestExpiry(instruments, { exchange: 'NFO', name: underlying, instrumentTypes: ['CE', 'PE'] });
         if (!nearestOpt) continue;
         const expStr = new Date(nearestOpt.expiry).toDateString();
-        
-        const matches = (indexedInstruments['NFO']?.OPT || []).filter(i => 
-            i.name === underlying && 
+
+        const matches = (indexedInstruments['NFO']?.OPT || []).filter(i =>
+            i.name === underlying &&
             new Date(i.expiry).toDateString() === expStr &&
             strikes.includes(Number(i.strike))
         );
@@ -630,13 +652,13 @@ async function buildKiteDashboardPayload(userId) {
         const step = MCX_ALLOWED[base]?.step || 100;
         const atm = Math.round(ltp / step) * step;
         const strikes = [atm - step, atm, atm + step];
-        
+
         const nearestOpt = pickNearestExpiry(instruments, { exchange: 'MCX', name: base, instrumentTypes: ['CE', 'PE'] });
         if (!nearestOpt) continue;
         const expStr = new Date(nearestOpt.expiry).toDateString();
-        
-        const matches = (indexedInstruments['MCX']?.OPT || []).filter(i => 
-            i.name === base && 
+
+        const matches = (indexedInstruments['MCX']?.OPT || []).filter(i =>
+            i.name === base &&
             new Date(i.expiry).toDateString() === expStr &&
             strikes.includes(Number(i.strike))
         );
@@ -802,7 +824,7 @@ function _initCepeExclOnce(pc, today) {
 
     if (changed) {
         global.EXCLUDED_CONTRACTS = excl;
-        try { fs.writeFileSync(_EXCLUDED_FILE_PATH, JSON.stringify(excl, null, 2)); } catch (_) {}
+        try { fs.writeFileSync(_EXCLUDED_FILE_PATH, JSON.stringify(excl, null, 2)); } catch (_) { }
         console.log(`✅ CE/PE 2nd expiry auto-excluded: ${excl.length} total excluded`);
     }
 }
@@ -845,21 +867,32 @@ router.get('/market/watchlist', authMiddleware, asyncHandler(async (req, res) =>
         const configVer = global.WATCHLIST_CONFIG_VERSION || 0;
         const cacheKey = `${req.query.nse || ''}_${req.query.nfoUnderlyings || ''}_${req.query.mcxOptSymbols || ''}_${req.query.nfoIndexOptRange || ''}_${WATCHLIST_CACHE_BUST}_v${configVer}`;
 
+        let rows;
         // If cache has data → return INSTANTLY, trigger background refresh if stale
         if (watchlistCache.data && watchlistCache.key === cacheKey) {
             watchlistLastQuery = req.query;
             watchlistLastUserId = req.user?.id;
             startWatchlistAutoRefresh();
-            return res.json(watchlistCache.data);
+            rows = watchlistCache.data;
+        } else {
+            rows = await _buildWatchlistData(req.query, req.user?.id);
+            watchlistCache = { data: rows, time: Date.now(), key: cacheKey };
+            watchlistLastQuery = req.query;
+            watchlistLastUserId = req.user?.id;
+            startWatchlistAutoRefresh();
         }
 
-        // First ever call → must wait for data (no cache yet)
-        const rows = await _buildWatchlistData(req.query, req.user?.id);
-        watchlistCache = { data: rows, time: Date.now(), key: cacheKey };
-        watchlistLastQuery = req.query;
-        watchlistLastUserId = req.user?.id;
-        startWatchlistAutoRefresh(); // start auto-refresh loop after first successful build
-        res.json(rows);
+        const { hideSet, markSet } = await getUserBannedScripsStatus(req.user?.id, req.user?.role);
+        const allowedSegments = await getClientAllowedSegments(req.user?.id, req.user?.role);
+        const filteredRows = (rows || [])
+            .filter(r => isScripSegmentAllowed(r.symbol, allowedSegments))
+            .filter(r => !checkSymbolHidden(r.symbol, hideSet))
+            .map(r => ({
+                ...r,
+                isBanned: checkSymbolMarked(r.symbol, markSet)
+            }));
+
+        res.json(filteredRows);
     } catch (err) {
         console.error('Unified watchlist error:', err.message);
         if (err.message?.includes('403') || err.message?.includes('expired')) {
@@ -958,9 +991,9 @@ function _getPrecomputed(instruments, query) {
     const _mcxAll = instruments.filter(i => i.exchange === 'MCX');
     const _mcxFut = _mcxAll.filter(i => String(i.instrument_type || '').toUpperCase() === 'FUT');
     const _mcxFutRecent = _mcxFut.filter(i => new Date(i.expiry || 0) >= mcxPrevWindow);
-    console.log(`🔍 MCX total=${_mcxAll.length} | FUT=${_mcxFut.length} | recent=${_mcxFutRecent.length} | sample=${_mcxFutRecent.slice(0,3).map(i=>i.tradingsymbol+'/'+i.expiry).join(', ')}`);
-    const _nfoAll = instruments.filter(i => i.exchange === 'NFO' && String(i.instrument_type||'').toUpperCase()==='FUT');
-    console.log(`🔍 NFO FUT=${_nfoAll.length} | sample=${_nfoAll.slice(0,3).map(i=>i.tradingsymbol).join(', ')}`);
+    console.log(`🔍 MCX total=${_mcxAll.length} | FUT=${_mcxFut.length} | recent=${_mcxFutRecent.length} | sample=${_mcxFutRecent.slice(0, 3).map(i => i.tradingsymbol + '/' + i.expiry).join(', ')}`);
+    const _nfoAll = instruments.filter(i => i.exchange === 'NFO' && String(i.instrument_type || '').toUpperCase() === 'FUT');
+    console.log(`🔍 NFO FUT=${_nfoAll.length} | sample=${_nfoAll.slice(0, 3).map(i => i.tradingsymbol).join(', ')}`);
 
     for (const inst of instruments) {
         if (inst.exchange !== 'MCX') continue;
@@ -989,7 +1022,7 @@ function _getPrecomputed(instruments, query) {
         // Test regex against first sample manually
         const _sample = _mcxFutRecent[0];
         if (_sample) {
-            console.log(`🔍 Regex test for "${_sample.tradingsymbol}" vs bases: ${mcxFutBases.slice(0,5).map(b => `${b}=${isExactMcxFutureForBase(_sample.tradingsymbol,b)}`).join(', ')}`);
+            console.log(`🔍 Regex test for "${_sample.tradingsymbol}" vs bases: ${mcxFutBases.slice(0, 5).map(b => `${b}=${isExactMcxFutureForBase(_sample.tradingsymbol, b)}`).join(', ')}`);
         }
     }
 
@@ -1095,7 +1128,7 @@ async function _buildWatchlistData(query, userId) {
             optList.filter(i => new Date(i.expiry || 0) >= today).map(i => i.expiry)
         )].sort((a, b) => new Date(a) - new Date(b)).slice(0, 2);
         if (nfoOptExpiries.length === 0) continue;
-        
+
         // ATM ±10 strikes range to match Contract Management
         const atm = Math.round(ltp / step) * step;
         const maxRange = Number.isFinite(nfoIndexOptRange) && nfoIndexOptRange > 0 ? nfoIndexOptRange : (step * 10);
@@ -1998,7 +2031,7 @@ router.get('/market/search', authMiddleware, asyncHandler(async (req, res) => {
 
     const instruments = await getInstrumentsFromCache();
     const query = q.toUpperCase();
-    
+
     // Fetch lot sizes from scrip_data for script-wise dynamic values without strict matching
     const [lotRows] = await db.execute('SELECT symbol, lot_size FROM scrip_data');
     const scripList = lotRows.map(r => {
@@ -2031,8 +2064,12 @@ router.get('/market/search', authMiddleware, asyncHandler(async (req, res) => {
         return (!isNaN(kiteLot) && kiteLot > 0) ? kiteLot : 1;
     };
 
+    const { hideSet, markSet } = await getUserBannedScripsStatus(req.user?.id, req.user?.role);
+    const allowedSegments = await getClientAllowedSegments(req.user?.id, req.user?.role);
     const results = instruments
         .filter(i => i.tradingsymbol?.toUpperCase().startsWith(query) || i.name?.toUpperCase().startsWith(query))
+        .filter(i => isScripSegmentAllowed(i.tradingsymbol, allowedSegments) || isScripSegmentAllowed(i.name, allowedSegments))
+        .filter(i => !checkSymbolHidden(i.tradingsymbol, hideSet) && !checkSymbolHidden(i.name, hideSet))
         .slice(0, 100)
         .map(i => ({
             symbol: i.tradingsymbol,
@@ -2042,7 +2079,8 @@ router.get('/market/search', authMiddleware, asyncHandler(async (req, res) => {
             expiry: i.expiry || '',
             instrument_token: i.instrument_token,
             lot_size: getDynamicLotSize(i),
-            lotSize: getDynamicLotSize(i)
+            lotSize: getDynamicLotSize(i),
+            isBanned: checkSymbolMarked(i.tradingsymbol, markSet) || checkSymbolMarked(i.name, markSet)
         }));
 
     res.json({ status: 'success', count: results.length, data: results });
@@ -2113,10 +2151,10 @@ router.get('/instruments/search', authMiddleware, asyncHandler(async (req, res) 
     const { q, exchange } = req.query;
     if (!q || q.length < 1) return res.json([]);
     const instruments = await getInstrumentsFromCache();
-    
+
     // BACKEND SEARCH LOGIC: Split by spaces and ensure every word is matched
     const searchTokens = q.toUpperCase().split(/\s+/).filter(t => t.length > 0);
-    
+
     // Fetch lot sizes from scrip_data for script-wise dynamic values without strict matching
     const [lotRows] = await db.execute('SELECT symbol, lot_size FROM scrip_data');
     const scripList = lotRows.map(r => {
@@ -2152,12 +2190,12 @@ router.get('/instruments/search', authMiddleware, asyncHandler(async (req, res) 
     let results = instruments.filter(i => {
         const symbolClean = (i.tradingsymbol || '').toUpperCase();
         const nameClean = (i.name || '').toUpperCase();
-        
+
         // All parts of the search query must exist in the symbol or name
-        const matchesQuery = searchTokens.every(token => 
+        const matchesQuery = searchTokens.every(token =>
             symbolClean.includes(token) || nameClean.includes(token)
         );
-        
+
         const matchesExchange = !exchange || i.exchange === exchange;
         return matchesQuery && matchesExchange;
     }).slice(0, 100);
@@ -2288,9 +2326,9 @@ async function fetchUnifiedWatchlistForSocket(userId, query = {}) {
         const configVer = global.WATCHLIST_CONFIG_VERSION || 0;
         const cacheKey = `${query.nse || ''}_${query.nfoUnderlyings || ''}_${query.mcxOptSymbols || ''}_${query.nfoIndexOptRange || ''}_${cacheBust}_v${configVer}`;
 
-        const isCacheValid = watchlistCache.data && 
-                             watchlistCache.key === cacheKey && 
-                             (Date.now() - (watchlistCache.time || 0)) < 3000;
+        const isCacheValid = watchlistCache.data &&
+            watchlistCache.key === cacheKey &&
+            (Date.now() - (watchlistCache.time || 0)) < 3000;
 
         if (isCacheValid) {
             watchlistLastQuery = query;

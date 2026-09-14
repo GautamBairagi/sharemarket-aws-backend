@@ -534,6 +534,7 @@ const runMigrations = async () => {
     await addColumn('tickers', 'start_time', 'DATETIME DEFAULT NULL AFTER is_active');
     await addColumn('tickers', 'end_time', 'DATETIME DEFAULT NULL AFTER start_time');
     await addColumn('tickers', 'created_by', 'INT DEFAULT NULL');
+    await addColumn('banned_limit_orders', 'created_by', 'INT DEFAULT NULL AFTER end_time');
 
     await db.execute(`
         CREATE TABLE IF NOT EXISTS banned_limit_orders (

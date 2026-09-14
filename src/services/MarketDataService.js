@@ -165,7 +165,7 @@ class MarketDataService extends EventEmitter {
             if (this.tickBuffer.length > 0 && (Date.now() - this.lastTickFlush > 3000 || this.tickBuffer.length >= 100)) {
                 const batchToInsert = this.tickBuffer.splice(0, 100);
                 this.lastTickFlush = Date.now();
-                
+
                 const db = require('../config/db');
                 db.query(`
                     INSERT INTO scrip_ticks_history 

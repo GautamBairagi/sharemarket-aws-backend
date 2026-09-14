@@ -20,7 +20,7 @@ function getIstDateStr(dateLike = new Date()) {
  * Service to handle Zerodha Kite Authentication (per user).
  */
 class KiteAuthService {
-    
+
     getLoginURL() {
         if (!API_KEY) throw new Error('KITE_API_KEY not set in .env');
         return `https://kite.trade/connect/login?api_key=${API_KEY}&v=3`;
@@ -28,16 +28,16 @@ class KiteAuthService {
 
     async handleCallback(userId, requestToken) {
         if (!requestToken) throw new Error('request_token is required');
-        
+
         const kite = new KiteConnect({ api_key: API_KEY });
-        
+
         try {
             const checksum = crypto.createHash('sha256')
                 .update(API_KEY + requestToken + API_SECRET)
                 .digest('hex');
 
             const response = await kite.generateSession(requestToken, API_SECRET);
-            
+
             // Save to DB
             await kiteRepo.saveSession(userId, {
                 ...response,

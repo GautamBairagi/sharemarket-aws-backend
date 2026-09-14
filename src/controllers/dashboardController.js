@@ -3,6 +3,8 @@ const marketDataService = require('../services/MarketDataService');
 const { getMcxBaseScrip } = require('../utils/symbolHelper');
 const MarginUtils = require('../utils/MarginUtils');
 const { getSegmentExposure } = require('../utils/segmentHelper');
+const { getUserBannedScripsStatus } = require('../utils/bannedHelper');
+const { getClientAllowedSegments, isScripSegmentAllowed } = require('../utils/segmentPermissionHelper');
 
 /**
  * Live Market Prices (Snapshot)
@@ -193,7 +195,7 @@ const getClientLiveM2M = async (req, res) => {
             const mType = (marketType || 'MCX').toUpperCase();
 
             // 1. NSE/Equity/Options/NFO generally use point-to-point (multiplier 1)
-            const isMcxSymbol = mType === 'MCX' || sym.startsWith('MCX:') || 
+            const isMcxSymbol = mType === 'MCX' || sym.startsWith('MCX:') ||
                 ['GOLD', 'SILVER', 'CRUDEOIL', 'NATURALGAS', 'COPPER', 'ZINC', 'NICKEL', 'LEAD', 'ALUMINIUM'].some(k => sym.includes(k));
             if (!isMcxSymbol && (mType === 'EQUITY' || mType === 'NSE' || mType === 'NFO' || mType === 'OPTIONS')) {
                 return 1;
@@ -402,7 +404,7 @@ const getClientLiveM2M = async (req, res) => {
             let totalUnits = qty * lotSize;
 
             // Fallback to actual_qty only for non-MCX if it exists
-            const isMcxTrade = mType === 'MCX' || (trade.symbol || '').toUpperCase().includes('MCX') || 
+            const isMcxTrade = mType === 'MCX' || (trade.symbol || '').toUpperCase().includes('MCX') ||
                 ['GOLD', 'SILVER', 'CRUDEOIL', 'NATURALGAS', 'COPPER', 'ZINC', 'NICKEL', 'LEAD', 'ALUMINIUM'].some(k => (trade.symbol || '').toUpperCase().includes(k));
             if (!isMcxTrade && trade.actual_qty && parseFloat(trade.actual_qty) > 0) {
                 totalUnits = parseFloat(trade.actual_qty);
@@ -545,7 +547,7 @@ const getClientLiveM2M = async (req, res) => {
                 try {
                     const segExp = getSegmentExposure(trade.symbol, mktType, userConfig);
                     if (segExp.isTurnover && segExp.intradayExposure > 0) {
-                        const isMcxTrade = mktType === 'MCX' || (trade.symbol || '').toUpperCase().includes('MCX') || 
+                        const isMcxTrade = mktType === 'MCX' || (trade.symbol || '').toUpperCase().includes('MCX') ||
                             ['GOLD', 'SILVER', 'CRUDEOIL', 'NATURALGAS', 'COPPER', 'ZINC', 'NICKEL', 'LEAD', 'ALUMINIUM'].some(k => (trade.symbol || '').toUpperCase().includes(k));
                         const tradeTurnover = entryPrice * qty * (isMcxTrade ? lotSize : 1);
                         dynamicMarginUsed = tradeTurnover / segExp.intradayExposure;
@@ -639,13 +641,13 @@ const getClientLiveM2M = async (req, res) => {
                             };
                         }
                         const p = clientMap[trade.user_id].positions[sym];
-                        if (isBuy) { 
-                            p.buyQty += qty; 
+                        if (isBuy) {
+                            p.buyQty += qty;
                             p.buyTotal += entryPrice * qty;
                             p.actualBuyQty += parseFloat(trade.actual_qty || 0);
                         }
-                        else { 
-                            p.sellQty += qty; 
+                        else {
+                            p.sellQty += qty;
                             p.sellTotal += entryPrice * qty;
                             p.actualSellQty += parseFloat(trade.actual_qty || 0);
                         }
@@ -858,14 +860,38 @@ const getIndices = async (req, res) => {
 
 const getWatchlist = async (req, res) => {
     try {
+        const { hideSet, markSet } = await getUserBannedScripsStatus(req.user?.id, req.user?.role);
         const [lotRows] = await db.execute('SELECT symbol, lot_size FROM scrip_data');
         const lotMap = {};
         lotRows.forEach(r => {
             lotMap[r.symbol.toUpperCase()] = parseFloat(r.lot_size || 1);
         });
 
+        function isHidden(sym) {
+            if (!sym || hideSet.size === 0) return false;
+            const cleanSym = sym.includes(':') ? sym.split(':')[1] : sym;
+            for (const h of hideSet) {
+                const cleanH = h.includes(':') ? h.split(':')[1] : h;
+                if (h === sym || cleanH === cleanSym) return true;
+            }
+            return false;
+        }
+
+        function isMarked(sym) {
+            if (!sym || markSet.size === 0) return false;
+            const cleanSym = sym.includes(':') ? sym.split(':')[1] : sym;
+            for (const m of markSet) {
+                const cleanM = m.includes(':') ? m.split(':')[1] : m;
+                if (m === sym || cleanM === cleanSym) return true;
+            }
+            return false;
+        }
+
+        const allowedSegments = await getClientAllowedSegments(req.user?.id, req.user?.role);
         const prices = marketDataService.prices;
         const filteredKeys = Object.keys(prices).filter(symbol => {
+            if (isHidden(symbol)) return false;
+            if (!isScripSegmentAllowed(symbol, allowedSegments)) return false;
             if (symbol.startsWith('CRYPTO:') || symbol.startsWith('FOREX:') || symbol.startsWith('COMMODITY:')) {
                 return symbol.includes('/');
             }
@@ -884,7 +910,8 @@ const getWatchlist = async (req, res) => {
                 bid: data.bid,
                 ask: data.ask,
                 change: data.chg_pct || 0,
-                lotSize: lotMap[symOnly.toUpperCase()] || 1
+                lotSize: lotMap[symOnly.toUpperCase()] || 1,
+                isBanned: isMarked(symbol)
             };
         });
         res.json(watchlist);

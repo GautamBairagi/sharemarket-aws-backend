@@ -65,12 +65,41 @@ class SocketManager {
 
                 try {
                     const userId = socket.user.id;
+                    const role = socket.user.role;
                     const q = query && typeof query === 'object' ? query : {};
                     const kiteResult = await kiteRoutes.fetchUnifiedWatchlistForSocket(userId, q);
 
-                    const crypto = marketDataService.getCryptoPrices();
-                    const forex = marketDataService.getForexPrices();
-                    const commodity = marketDataService.getCommodityPrices();
+                    const { getClientAllowedSegments } = require('../utils/segmentPermissionHelper');
+                    const { getUserBannedScripsStatus, checkSymbolHidden, checkSymbolMarked } = require('../utils/bannedHelper');
+
+                    const allowed = await getClientAllowedSegments(userId, role);
+                    const { hideSet, markSet } = await getUserBannedScripsStatus(userId, role);
+
+                    const filterAndMark = (items) => {
+                        if (!items || !items.length) return [];
+                        return items
+                            .filter(item => {
+                                const sym = item.symbol || '';
+                                const name = item.name || '';
+                                return !checkSymbolHidden(sym, hideSet) && !checkSymbolHidden(name, hideSet);
+                            })
+                            .map(item => {
+                                const sym = item.symbol || '';
+                                const name = item.name || '';
+                                if (checkSymbolMarked(sym, markSet) || checkSymbolMarked(name, markSet)) {
+                                    return { ...item, isBanned: true };
+                                }
+                                return item;
+                            });
+                    };
+
+                    const rawCrypto = allowed.CRYPTO ? marketDataService.getCryptoPrices() : [];
+                    const rawForex = allowed.FOREX ? marketDataService.getForexPrices() : [];
+                    const rawCommodity = allowed.COMMODITY ? marketDataService.getCommodityPrices() : [];
+
+                    const crypto = filterAndMark(rawCrypto);
+                    const forex = filterAndMark(rawForex);
+                    const commodity = filterAndMark(rawCommodity);
 
                     const kite_connected = Boolean(kiteResult.ok && !kiteResult.kite_disconnected);
 

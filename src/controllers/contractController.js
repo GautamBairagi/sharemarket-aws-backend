@@ -2,6 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const kiteService = require('../utils/kiteService');
 const db = require('../config/db');
+const { getUserBannedScripsStatus } = require('../utils/bannedHelper');
+const { getClientAllowedSegments, isScripSegmentAllowed } = require('../utils/segmentPermissionHelper');
 
 const EXCLUDED_FILE = path.join(__dirname, '../data/excluded_contracts.json');
 const MANUALLY_ENABLED_FILE = path.join(__dirname, '../data/manually_enabled_contracts.json');
@@ -171,6 +173,26 @@ function _bustWatchlistCache() {
     global.WATCHLIST_CONFIG_VERSION = Date.now();
 }
 
+function checkSymbolHidden(sym, hideSet) {
+    if (!sym || !hideSet || hideSet.size === 0) return false;
+    const cleanSym = sym.includes(':') ? sym.split(':')[1] : sym;
+    for (const h of hideSet) {
+        const cleanH = h.includes(':') ? h.split(':')[1] : h;
+        if (h === sym || cleanH === cleanSym) return true;
+    }
+    return false;
+}
+
+function checkSymbolMarked(sym, markSet) {
+    if (!sym || !markSet || markSet.size === 0) return false;
+    const cleanSym = sym.includes(':') ? sym.split(':')[1] : sym;
+    for (const m of markSet) {
+        const cleanM = m.includes(':') ? m.split(':')[1] : m;
+        if (m === sym || cleanM === cleanSym) return true;
+    }
+    return false;
+}
+
 // Get all available contracts
 exports.getAllContracts = async (req, res) => {
     try {
@@ -180,11 +202,17 @@ exports.getAllContracts = async (req, res) => {
                 message: 'Kite not connected. Please login first to manage contracts.'
             });
         }
+        const { hideSet, markSet } = await getUserBannedScripsStatus(req.user?.id, req.user?.role);
+        const allowedSegments = await getClientAllowedSegments(req.user?.id, req.user?.role);
         const allContracts = await getAllContractsFromKite();
-        const contracts = allContracts.map(contract => ({
-            ...contract,
-            isSelected: !excludedContracts.includes(contract.symbol)
-        }));
+        const contracts = allContracts
+            .filter(contract => isScripSegmentAllowed(contract.symbol, allowedSegments))
+            .filter(contract => !checkSymbolHidden(contract.symbol, hideSet))
+            .map(contract => ({
+                ...contract,
+                isSelected: !excludedContracts.includes(contract.symbol),
+                isBanned: checkSymbolMarked(contract.symbol, markSet)
+            }));
         res.json({ status: 'success', total: contracts.length, data: contracts });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -200,8 +228,12 @@ exports.getSelectedContracts = async (req, res) => {
                 message: 'Kite not connected.'
             });
         }
+        const { hideSet } = await getUserBannedScripsStatus(req.user?.id, req.user?.role);
+        const allowedSegments = await getClientAllowedSegments(req.user?.id, req.user?.role);
         const allContracts = await getAllContractsFromKite();
-        const selected = allContracts.filter(contract => !excludedContracts.includes(contract.symbol));
+        const selected = allContracts
+            .filter(contract => isScripSegmentAllowed(contract.symbol, allowedSegments))
+            .filter(contract => !excludedContracts.includes(contract.symbol) && !checkSymbolHidden(contract.symbol, hideSet));
         res.json({ status: 'success', count: selected.length, data: selected.map(c => c.symbol) });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -309,7 +341,13 @@ exports.searchContracts = async (req, res) => {
             isSelected: false
         }));
 
-        const combined = [...kiteContracts, ...cryptoData, ...forexData, ...commodityData];
+        const { hideSet, markSet } = await getUserBannedScripsStatus(req.user?.id, req.user?.role);
+        const combined = [...kiteContracts, ...cryptoData, ...forexData, ...commodityData]
+            .filter(c => !checkSymbolHidden(c.symbol, hideSet))
+            .map(c => ({
+                ...c,
+                isBanned: checkSymbolMarked(c.symbol, markSet)
+            }));
 
         res.json({
             status: 'success',

@@ -205,7 +205,7 @@ runMigrations()
         startTargetSLMonitoring(); // Monitor target/SL every 5 seconds
         startAlertMonitoring(); // Monitor price alerts every 3 seconds
         startPendingOrderMonitoring(); // Monitor pending orders every 3 seconds
-        
+
         // Start weekly closing/settlement auto-cron job
         const { startWeeklySettlementJob } = require('./services/WeeklySettlementService');
         startWeeklySettlementJob();

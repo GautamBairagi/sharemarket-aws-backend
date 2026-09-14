@@ -8,6 +8,7 @@ const { buildTradeLog } = require('../utils/logFormatter');
 const MarginService = require('../services/MarginService');
 const tradeService = require('../services/TradeService');
 const { getSegmentExposure, isOptionsSymbol } = require('../utils/segmentHelper');
+const { isScripBannedForUser } = require('../utils/bannedHelper');
 
 const syncPaperPosition = async (userId, symbol, connection = db) => {
     try {
@@ -702,7 +703,8 @@ const placeOrder = async (req, res) => {
 
 
         // ─── PERMANENT SCRIP BAN CHECK ──────────────────────────────────────────
-        if (scripBanRows.length > 0) {
+        const isBannedByHierarchy = await isScripBannedForUser(symbol, targetUserId, targetUser.role);
+        if (scripBanRows.length > 0 || isBannedByHierarchy) {
             return res.status(400).json({
                 message: `Trading in ${symbol} is prohibited. Scrip is currently banned.`
             });

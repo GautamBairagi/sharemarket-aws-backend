@@ -86,10 +86,12 @@ const deleteMultipleBannedOrders = async (req, res) => {
     }
 };
 
+const { getUserBannedScripsStatus } = require('../utils/bannedHelper');
+
 const getBannedScrips = async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT symbol FROM banned_scrips');
-        res.json(rows.map(r => r.symbol));
+        const { markSet } = await getUserBannedScripsStatus(req.user.id, req.user.role);
+        res.json(Array.from(markSet));
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error' });

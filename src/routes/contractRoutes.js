@@ -1,18 +1,19 @@
 const express = require('express');
 const router = express.Router();
 const contractController = require('../controllers/contractController');
+const { authMiddleware } = require('../middleware/auth');
 
 // Get all available contracts
-router.get('/all', contractController.getAllContracts);
+router.get('/all', authMiddleware, contractController.getAllContracts);
 
 // Get selected/active contracts
-router.get('/selected', contractController.getSelectedContracts);
+router.get('/selected', authMiddleware, contractController.getSelectedContracts);
 
 // Save selected contracts
-router.post('/save-selection', contractController.saveContractSelection);
+router.post('/save-selection', authMiddleware, contractController.saveContractSelection);
 
 // Get contracts by search
-router.get('/search', contractController.searchContracts);
+router.get('/search', authMiddleware, contractController.searchContracts);
 
 // ── Smart Rollover Suggestion System (read-only recommendation layer) ──────────
 // GET  /api/contracts/rollover/suggestions  → list rollover suggestions
