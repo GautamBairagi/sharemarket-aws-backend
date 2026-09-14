@@ -837,8 +837,8 @@ function startWatchlistAutoRefresh() {
     setInterval(async () => {
         if (!watchlistLastQuery || !kiteService.isAuthenticated()) return;
         await refreshWatchlistInBackground(watchlistLastQuery, watchlistLastUserId);
-    }, 2000);
-    console.log('🔄 Watchlist auto-refresh started (every 2s)');
+    }, 10000);
+    console.log('🔄 Watchlist auto-refresh started (every 10s)');
 }
 
 // Background refresh: fetches new data without blocking the response

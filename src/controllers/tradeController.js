@@ -1786,11 +1786,11 @@ const getActivePositions = async (req, res) => {
                 COUNT(*) AS trade_count
             FROM trades t
             LEFT JOIN script_testing st
-                ON UPPER(t.symbol) = CONCAT('NFO:', UPPER(st.tradingsymbol))
-                OR UPPER(t.symbol) = UPPER(st.tradingsymbol)
+                ON UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = CONCAT('NFO:', UPPER(st.tradingsymbol)) COLLATE utf8mb4_unicode_ci
+                OR UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = UPPER(st.tradingsymbol) COLLATE utf8mb4_unicode_ci
             LEFT JOIN commodity_forex_crypto_lot_sizes cfl
-                ON UPPER(t.symbol) = UPPER(cfl.symbol)
-            LEFT JOIN scrip_data sd ON t.symbol = sd.symbol
+                ON UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = UPPER(cfl.symbol) COLLATE utf8mb4_unicode_ci
+            LEFT JOIN scrip_data sd ON t.symbol COLLATE utf8mb4_unicode_ci = sd.symbol COLLATE utf8mb4_unicode_ci
             WHERE t.status IN ('OPEN', 'HOLD')
               AND t.is_pending = 0
         `;
@@ -1894,7 +1894,8 @@ const getActivePositions = async (req, res) => {
  * Get Trades by Status (Active, Closed, Deleted)
  */
 const getTrades = async (req, res) => {
-    const { status, user_id } = req.query; // OPEN, CLOSED, DELETED, CANCELLED
+    const { status } = req.query; // OPEN, CLOSED, DELETED, CANCELLED
+    const targetUserId = req.query.user_id || req.query.userId || req.query.clientId;
     try {
         // lot_size priority:
         //   1. trades.lot_size_at_entry  → saved at trade creation (most accurate)
@@ -1915,11 +1916,11 @@ const getTrades = async (req, res) => {
             JOIN users u ON t.user_id = u.id
             LEFT JOIN users uc ON t.created_by = uc.id
             LEFT JOIN script_testing st
-                ON UPPER(t.symbol) = CONCAT('NFO:', UPPER(st.tradingsymbol))
-                OR UPPER(t.symbol) = UPPER(st.tradingsymbol)
+                ON UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = CONCAT('NFO:', UPPER(st.tradingsymbol)) COLLATE utf8mb4_unicode_ci
+                OR UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = UPPER(st.tradingsymbol) COLLATE utf8mb4_unicode_ci
             LEFT JOIN commodity_forex_crypto_lot_sizes cfl
-                ON UPPER(t.symbol) = UPPER(cfl.symbol)
-            LEFT JOIN scrip_data sd ON t.symbol = sd.symbol
+                ON UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = UPPER(cfl.symbol) COLLATE utf8mb4_unicode_ci
+            LEFT JOIN scrip_data sd ON t.symbol COLLATE utf8mb4_unicode_ci = sd.symbol COLLATE utf8mb4_unicode_ci
             WHERE 1=1`;
         const params = [];
 
@@ -1953,9 +1954,9 @@ const getTrades = async (req, res) => {
         }
 
         // Filter by specific user_id (for client detail views)
-        if (user_id) {
+        if (targetUserId) {
             query += ' AND t.user_id = ?';
-            params.push(user_id);
+            params.push(targetUserId);
         } else if (req.user.role !== 'TRADER') {
             // Exclude demo trades for overall lists viewed by admin/broker
             query += ' AND u.is_demo = 0';
