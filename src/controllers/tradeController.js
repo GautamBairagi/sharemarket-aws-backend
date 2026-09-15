@@ -1786,11 +1786,11 @@ const getActivePositions = async (req, res) => {
                 COUNT(*) AS trade_count
             FROM trades t
             LEFT JOIN script_testing st
-                ON UPPER(t.symbol) = CONCAT('NFO:', UPPER(st.tradingsymbol))
-                OR UPPER(t.symbol) = UPPER(st.tradingsymbol)
+                ON UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = CONCAT('NFO:', UPPER(st.tradingsymbol)) COLLATE utf8mb4_unicode_ci
+                OR UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = UPPER(st.tradingsymbol) COLLATE utf8mb4_unicode_ci
             LEFT JOIN commodity_forex_crypto_lot_sizes cfl
-                ON UPPER(t.symbol) = UPPER(cfl.symbol)
-            LEFT JOIN scrip_data sd ON t.symbol = sd.symbol
+                ON UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = UPPER(cfl.symbol) COLLATE utf8mb4_unicode_ci
+            LEFT JOIN scrip_data sd ON t.symbol COLLATE utf8mb4_unicode_ci = sd.symbol COLLATE utf8mb4_unicode_ci
             WHERE t.status IN ('OPEN', 'HOLD')
               AND t.is_pending = 0
         `;
@@ -1916,15 +1916,15 @@ const getTrades = async (req, res) => {
             JOIN users u ON t.user_id = u.id
             LEFT JOIN users uc ON t.created_by = uc.id
             LEFT JOIN script_testing st
-                ON UPPER(t.symbol) = CONCAT('NFO:', UPPER(st.tradingsymbol))
-                OR UPPER(t.symbol) = UPPER(st.tradingsymbol)
+                ON UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = CONCAT('NFO:', UPPER(st.tradingsymbol)) COLLATE utf8mb4_unicode_ci
+                OR UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = UPPER(st.tradingsymbol) COLLATE utf8mb4_unicode_ci
             LEFT JOIN commodity_forex_crypto_lot_sizes cfl
-                ON UPPER(t.symbol) = UPPER(cfl.symbol)
-                OR UPPER(t.symbol) = CONCAT('COMMODITY:', UPPER(cfl.symbol))
-                OR UPPER(t.symbol) = CONCAT('FOREX:', UPPER(cfl.symbol))
-                OR UPPER(t.symbol) = CONCAT('CRYPTO:', UPPER(cfl.symbol))
-                OR REPLACE(REPLACE(REPLACE(REPLACE(UPPER(t.symbol), 'COMMODITY:', ''), 'FOREX:', ''), 'CRYPTO:', ''), '/', '') = REPLACE(UPPER(cfl.symbol), '/', '')
-            LEFT JOIN scrip_data sd ON t.symbol = sd.symbol
+                ON UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = UPPER(cfl.symbol) COLLATE utf8mb4_unicode_ci
+                OR UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = CONCAT('COMMODITY:', UPPER(cfl.symbol)) COLLATE utf8mb4_unicode_ci
+                OR UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = CONCAT('FOREX:', UPPER(cfl.symbol)) COLLATE utf8mb4_unicode_ci
+                OR UPPER(t.symbol) COLLATE utf8mb4_unicode_ci = CONCAT('CRYPTO:', UPPER(cfl.symbol)) COLLATE utf8mb4_unicode_ci
+                OR REPLACE(REPLACE(REPLACE(REPLACE(UPPER(t.symbol), 'COMMODITY:', ''), 'FOREX:', ''), 'CRYPTO:', ''), '/', '') COLLATE utf8mb4_unicode_ci = REPLACE(UPPER(cfl.symbol), '/', '') COLLATE utf8mb4_unicode_ci
+            LEFT JOIN scrip_data sd ON t.symbol COLLATE utf8mb4_unicode_ci = sd.symbol COLLATE utf8mb4_unicode_ci
             WHERE 1=1`;
         const params = [];
 

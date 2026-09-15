@@ -23,9 +23,10 @@ if (process.env.DATABASE_URL) {
   console.log('🔌 Connecting using DATABASE_URL (Railway/Prod mode)');
   pool = mysql.createPool({
     uri: process.env.DATABASE_URL,
-    connectionLimit: 15,
+    connectionLimit: 25,
     waitForConnections: true,
     queueLimit: 0,
+    connectTimeout: 30000,
     timezone: '+05:30' // Forces mysql2 driver to use IST
   });
 } else {
@@ -35,7 +36,7 @@ if (process.env.DATABASE_URL) {
     password: process.env.DB_PASSWORD || '',
     database: process.env.DB_NAME || 'traderdb',
     waitForConnections: true,
-    connectionLimit: 10,
+    connectionLimit: 20,
     connectTimeout: 30000,
     queueLimit: 0,
     timezone: '+05:30' // Forces mysql2 driver to use IST
