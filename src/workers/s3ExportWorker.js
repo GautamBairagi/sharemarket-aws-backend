@@ -21,14 +21,28 @@ const formatISTTimestamp = (val) => {
 async function runWorker() {
     console.log('[s3ExportWorker] 🚀 AWS S3 ZIP Export Worker started in separate Node OS process...');
 
-    // Dynamic import for ESM package 'archiver'
+    // Dynamic import & unwrap for ESM/CommonJS package 'archiver'
     let archiverFn = null;
     try {
-        const mod = await import('archiver');
-        const fn = mod.default || mod;
-        archiverFn = typeof fn === 'function' ? fn : (typeof fn?.default === 'function' ? fn.default : (typeof fn?.create === 'function' ? fn.create : null));
+        let mod = await import('archiver');
+        while (mod && typeof mod !== 'function' && mod.default) {
+            mod = mod.default;
+        }
+        if (typeof mod === 'function') {
+            archiverFn = mod;
+        } else if (typeof mod?.create === 'function') {
+            archiverFn = mod.create;
+        }
     } catch (importErr) {
-        console.warn('[s3ExportWorker] ⚠️ Could not load archiver module:', importErr.message);
+        try {
+            let req = require('archiver');
+            while (req && typeof req !== 'function' && req.default) {
+                req = req.default;
+            }
+            if (typeof req === 'function') archiverFn = req;
+        } catch (_) {
+            console.warn('[s3ExportWorker] ⚠️ Could not load archiver module:', importErr.message);
+        }
     }
 
     let args = {};
