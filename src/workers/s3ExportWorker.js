@@ -183,10 +183,6 @@ async function runWorker() {
         // Clean up temporary CSV files after zip creation
         createdCsvFiles.forEach(f => { if (fs.existsSync(f.filePath)) fs.unlinkSync(f.filePath); });
 
-        const zipStats = fs.statSync(zipFilePath);
-        const zipMb = (zipStats.size / (1024 * 1024)).toFixed(2);
-        console.log(`[s3ExportWorker] ✅ ZIP archive created successfully: ${zipFileName} (${zipMb} MB) with ${createdCsvFiles.length} Excel-compatible CSV part(s)`);
-
 
         // 6. Upload .ZIP to Amazon S3 Bucket if credentials present
         let presignedUrl = null;
