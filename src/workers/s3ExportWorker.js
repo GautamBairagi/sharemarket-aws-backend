@@ -22,10 +22,11 @@ async function runWorker() {
     console.log('[s3ExportWorker] 🚀 AWS S3 ZIP Export Worker started in separate Node OS process...');
 
     // Dynamic import for ESM package 'archiver'
-    let archiver = null;
+    let archiverFn = null;
     try {
-        const archiverModule = await import('archiver');
-        archiver = archiverModule.default || archiverModule;
+        const mod = await import('archiver');
+        const fn = mod.default || mod;
+        archiverFn = typeof fn === 'function' ? fn : (typeof fn?.default === 'function' ? fn.default : (typeof fn?.create === 'function' ? fn.create : null));
     } catch (importErr) {
         console.warn('[s3ExportWorker] ⚠️ Could not load archiver module:', importErr.message);
     }
@@ -153,11 +154,11 @@ async function runWorker() {
 
         // 5. Compress CSV Parts into .ZIP Archive using archiver
         let zipMb = '0.00';
-        if (archiver) {
+        if (archiverFn) {
             try {
                 console.log(`[s3ExportWorker] 📦 Compressing ${createdCsvFiles.length} CSV part(s) into ZIP archive...`);
                 const zipOutputStream = fs.createWriteStream(zipFilePath);
-                const archive = archiver('zip', { zlib: { level: 9 } });
+                const archive = archiverFn('zip', { zlib: { level: 9 } });
 
                 archive.pipe(zipOutputStream);
                 createdCsvFiles.forEach(f => {
@@ -186,7 +187,7 @@ async function runWorker() {
 
         // 6. Upload .ZIP to Amazon S3 Bucket if credentials present
         let presignedUrl = null;
-        if (s3Bucket && s3AccessKey && s3SecretKey) {
+        if (fs.existsSync(zipFilePath) && s3Bucket && s3AccessKey && s3SecretKey) {
             try {
                 console.log(`[s3ExportWorker] ☁️ Uploading ${zipFileName} to Amazon S3 Bucket (${s3Bucket})...`);
                 const s3Client = new S3Client({
