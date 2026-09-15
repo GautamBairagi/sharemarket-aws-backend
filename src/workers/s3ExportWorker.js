@@ -1,7 +1,6 @@
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const archiver = require('archiver');
 const nodemailer = require('nodemailer');
 const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
@@ -21,6 +20,15 @@ const formatISTTimestamp = (val) => {
 
 async function runWorker() {
     console.log('[s3ExportWorker] 🚀 AWS S3 ZIP Export Worker started in separate Node OS process...');
+
+    // Dynamic import for ESM package 'archiver'
+    let archiver = null;
+    try {
+        const archiverModule = await import('archiver');
+        archiver = archiverModule.default || archiverModule;
+    } catch (importErr) {
+        console.warn('[s3ExportWorker] ⚠️ Could not load archiver module:', importErr.message);
+    }
 
     let args = {};
     try {
@@ -144,20 +152,33 @@ async function runWorker() {
         console.log(`[s3ExportWorker] 📊 Finished writing ${rowCount.toLocaleString()} total records across ${createdCsvFiles.length} CSV part file(s).`);
 
         // 5. Compress CSV Parts into .ZIP Archive using archiver
-        console.log(`[s3ExportWorker] 📦 Compressing ${createdCsvFiles.length} CSV part(s) into ZIP archive...`);
-        const zipOutputStream = fs.createWriteStream(zipFilePath);
-        const archive = archiver('zip', { zlib: { level: 9 } });
+        let zipMb = '0.00';
+        if (archiver) {
+            try {
+                console.log(`[s3ExportWorker] 📦 Compressing ${createdCsvFiles.length} CSV part(s) into ZIP archive...`);
+                const zipOutputStream = fs.createWriteStream(zipFilePath);
+                const archive = archiver('zip', { zlib: { level: 9 } });
 
-        archive.pipe(zipOutputStream);
-        createdCsvFiles.forEach(f => {
-            archive.file(f.filePath, { name: f.fileName });
-        });
-        await archive.finalize();
+                archive.pipe(zipOutputStream);
+                createdCsvFiles.forEach(f => {
+                    archive.file(f.filePath, { name: f.fileName });
+                });
+                await archive.finalize();
 
-        await new Promise((res, rej) => {
-            zipOutputStream.on('finish', res);
-            zipOutputStream.on('error', rej);
-        });
+                await new Promise((res, rej) => {
+                    zipOutputStream.on('finish', res);
+                    zipOutputStream.on('error', rej);
+                });
+
+                if (fs.existsSync(zipFilePath)) {
+                    const zipStats = fs.statSync(zipFilePath);
+                    zipMb = (zipStats.size / (1024 * 1024)).toFixed(2);
+                    console.log(`[s3ExportWorker] ✅ ZIP archive created successfully: ${zipFileName} (${zipMb} MB) with ${createdCsvFiles.length} CSV part(s)`);
+                }
+            } catch (zipErr) {
+                console.error('[s3ExportWorker] ⚠️ ZIP archiving error (continuing purge):', zipErr.message);
+            }
+        }
 
         // Clean up temporary CSV files after zip creation
         createdCsvFiles.forEach(f => { if (fs.existsSync(f.filePath)) fs.unlinkSync(f.filePath); });
