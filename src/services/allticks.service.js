@@ -538,11 +538,11 @@ class AllTickService {
 
     _startPolling() {
         if (this.pollingInterval) return;
-        console.log('[ALLTICKS] Starting HTTP polling (depth-tick + trade-tick, 1s interval)...');
+        console.log('[ALLTICKS] Starting HTTP polling (depth-tick 3s, trade-tick 5s interval)...');
         this._poll();
         this._pollTradeTick(); // Fetch real LTP on start
-        this.pollingInterval = setInterval(() => this._poll(), 1000);
-        this.tradeTickInterval = setInterval(() => this._pollTradeTick(), 2000); // LTP every 2s
+        this.pollingInterval = setInterval(() => this._poll(), 3000); // 3s interval to respect HTTP rate limits
+        this.tradeTickInterval = setInterval(() => this._pollTradeTick(), 5000); // 5s interval for LTP
     }
 
     _stopPolling() {
@@ -558,6 +558,9 @@ class AllTickService {
 
     async _poll() {
         if (!this.token || !this.isRunning) return;
+
+        // If backed off due to 429, skip poll cycle
+        if (this.backoffUntil && Date.now() < this.backoffUntil) return;
 
         const allSymbols = [...this.forexSymbols, ...this.cryptoSymbols, ...this.commoditySymbols];
         const query = JSON.stringify({
@@ -586,7 +589,13 @@ class AllTickService {
             tickList.forEach(tick => this._processTick(tick));
 
         } catch (err) {
-            if (err.code !== 'ECONNABORTED') {
+            if (err.response?.status === 429) {
+                this.backoffUntil = Date.now() + 10000; // Backoff for 10 seconds on 429
+                if (!this.last429Warning || Date.now() - this.last429Warning > 30000) {
+                    console.warn('[ALLTICKS] ⚠️ HTTP 429 Rate Limited. Backing off polling for 10s.');
+                    this.last429Warning = Date.now();
+                }
+            } else if (err.code !== 'ECONNABORTED') {
                 console.error('[ALLTICKS] HTTP Poll Error:', err.message);
             }
         }
