@@ -186,20 +186,28 @@ class TradeService {
                 }
             }
             else {
-                // Default fallback to scrip_data
-                try {
-                    const [scripRows] = await connection.execute(
-                        'SELECT lot_size FROM scrip_data WHERE symbol = ?',
-                        [trade.symbol]
-                    );
-                    if (scripRows.length > 0 && parseFloat(scripRows[0].lot_size) > 0) {
-                        lotSize = parseFloat(scripRows[0].lot_size);
-                        console.log(`[TradeService] ${mType} Lot Size (from DB): ${trade.symbol} → ${lotSize}`);
-                    } else {
+                // Check CommodityLotService first for COMMODITY, COMEX, FOREX, CRYPTO lot sizes
+                const commodityLotService = require('./CommodityLotService');
+                const info = commodityLotService.getLotInfo(trade.symbol);
+                if (info && info.lot_size > 0) {
+                    lotSize = info.lot_size;
+                    console.log(`[TradeService] ${mType} Lot Size (from CommodityLotService): ${trade.symbol} → ${lotSize}`);
+                } else {
+                    try {
+                        const cleanSym = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
+                        const [scripRows] = await connection.execute(
+                            'SELECT lot_size FROM scrip_data WHERE symbol = ? OR symbol = ?',
+                            [trade.symbol, cleanSym]
+                        );
+                        if (scripRows.length > 0 && parseFloat(scripRows[0].lot_size) > 0) {
+                            lotSize = parseFloat(scripRows[0].lot_size);
+                            console.log(`[TradeService] ${mType} Lot Size (from scrip_data): ${trade.symbol} → ${lotSize}`);
+                        } else {
+                            lotSize = 1;
+                        }
+                    } catch (e) {
                         lotSize = 1;
                     }
-                } catch (e) {
-                    lotSize = 1;
                 }
             }
 

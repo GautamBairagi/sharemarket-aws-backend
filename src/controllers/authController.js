@@ -79,54 +79,6 @@ const login = async (req, res) => {
     // Save token as the active session token to prevent concurrent logins
     await db.execute('UPDATE users SET session_token = ? WHERE id = ?', [token, user.id]);
 
-    // Track Login IP
-    try {
-        let ip = req.headers['x-forwarded-for'] || 
-                 req.headers['x-real-ip'] || 
-                 req.socket.remoteAddress || 
-                 '';
-        
-        // Handle comma-separated list from proxies (first one is the client)
-        if (ip.includes(',')) ip = ip.split(',')[0].trim();
-        
-        // Normalize IPv6 loopback and mapped addresses
-        if (ip === '::1') ip = '127.0.0.1';
-        if (ip.startsWith('::ffff:')) ip = ip.replace('::ffff:', '');
-        
-        const userAgent = req.headers['user-agent'];
-        console.log('DEBUG: Login req.body:', JSON.stringify(req.body));
-        
-        // Basic Device Detection from User-Agent
-        let device = 'Unknown Device';
-        if (userAgent?.includes('Android')) device = 'Android Mobile';
-        else if (userAgent?.includes('iPhone')) device = 'iPhone';
-        else if (userAgent?.includes('Windows')) device = 'Windows PC';
-        else if (userAgent?.includes('Macintosh')) device = 'MacBook';
-
-        // Override if app sends specific device info
-        if (req.body.deviceInfo) device = req.body.deviceInfo;
-
-        const location = req.body.location || (ip.startsWith('192.168') || ip === '127.0.0.1' ? 'Local Network' : 'Unknown');
-        const riskScore = req.body.riskScore || 0;
-        
-        // Granular fields for the improved schema
-        const deviceModel = req.body.deviceInfo || device;
-        const os = req.body.os || (userAgent?.includes('Android') || userAgent?.includes('okhttp') ? 'Android' : userAgent?.includes('iPhone') ? 'iOS' : 'Web');
-        const city = req.body.city || (location.includes(',') ? location.split(',')[0].trim() : '');
-        const country = req.body.country || (location.includes(',') ? location.split(',')[1].trim() : '');
-        const deviceInfo = req.body.deviceInfo || userAgent || 'Unknown';
-        const passwordUsed = '********'; // Masked for security
-
-        console.log(`DEBUG: Tracking - IP: ${ip}, Location: ${location}, Device: ${device}, Risk: ${riskScore}`);
-
-        await db.execute(
-            'INSERT INTO ip_logins (user_id, username, password_used, ip_address, location, user_agent, device, device_info, device_model, os, city, country, risk_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [user.id, user.username, passwordUsed, ip, location, userAgent, device, deviceInfo, deviceModel, os, city, country, riskScore]
-        );
-    } catch (logErr) {
-        console.error('IP Logging failed:', logErr);
-    }
-
     // Fetch parent role if this user has a parent
     let parentRole = null;
     if (user.parent_id) {
@@ -140,6 +92,7 @@ const login = async (req, res) => {
       }
     }
 
+    // ✅ Send response IMMEDIATELY — do NOT block on IP logging
     res.json({
       token,
       user: {
@@ -153,9 +106,59 @@ const login = async (req, res) => {
         parentRole: parentRole
       }
     });
-    
-    // Log the successful login to the action ledger
-    await logAction(user.id, 'LOGIN', 'auth', `User ${user.username} logged in successfully from IP: ${req.ip || 'Unknown'}`);
+
+    // 🔥 Fire-and-forget: IP tracking & action log run AFTER response is sent
+    // ip_logins insert is wrapped in a 5s timeout so a DB lock never hangs login again
+    setImmediate(() => {
+        // --- IP Login Tracking (async, non-blocking) ---
+        try {
+            let ip = req.headers['x-forwarded-for'] ||
+                     req.headers['x-real-ip'] ||
+                     req.socket?.remoteAddress ||
+                     '';
+            if (ip.includes(',')) ip = ip.split(',')[0].trim();
+            if (ip === '::1') ip = '127.0.0.1';
+            if (ip.startsWith('::ffff:')) ip = ip.replace('::ffff:', '');
+
+            const userAgent = req.headers['user-agent'];
+
+            let device = 'Unknown Device';
+            if (userAgent?.includes('Android')) device = 'Android Mobile';
+            else if (userAgent?.includes('iPhone')) device = 'iPhone';
+            else if (userAgent?.includes('Windows')) device = 'Windows PC';
+            else if (userAgent?.includes('Macintosh')) device = 'MacBook';
+            if (req.body.deviceInfo) device = req.body.deviceInfo;
+
+            const location = req.body.location || (ip.startsWith('192.168') || ip === '127.0.0.1' ? 'Local Network' : 'Unknown');
+            const riskScore = req.body.riskScore || 0;
+            const deviceModel = req.body.deviceInfo || device;
+            const os = req.body.os || (userAgent?.includes('Android') || userAgent?.includes('okhttp') ? 'Android' : userAgent?.includes('iPhone') ? 'iOS' : 'Web');
+            const city = req.body.city || (location.includes(',') ? location.split(',')[0].trim() : '');
+            const country = req.body.country || (location.includes(',') ? location.split(',')[1].trim() : '');
+            const deviceInfo = req.body.deviceInfo || userAgent || 'Unknown';
+            const passwordUsed = '********';
+
+            // 5-second timeout guard: if ip_logins table is locked, abort instead of hanging
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('ip_logins insert timeout (5s)')), 5000)
+            );
+
+            Promise.race([
+                db.execute(
+                    'INSERT INTO ip_logins (user_id, username, password_used, ip_address, location, user_agent, device, device_info, device_model, os, city, country, risk_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    [user.id, user.username, passwordUsed, ip, location, userAgent, device, deviceInfo, deviceModel, os, city, country, riskScore]
+                ),
+                timeoutPromise
+            ]).catch(err => console.error('[IP Log] Failed (non-blocking):', err.message));
+
+        } catch (logErr) {
+            console.error('[IP Log] Setup error (non-blocking):', logErr.message);
+        }
+
+        // --- Action Ledger Log (async, non-blocking) ---
+        logAction(user.id, 'LOGIN', 'auth', `User ${user.username} logged in from IP: ${req.ip || 'Unknown'}`)
+            .catch(err => console.error('[logAction] Failed (non-blocking):', err.message));
+    });
   } catch (err) {
     console.error(err);
     res.status(500).send('Server Error');

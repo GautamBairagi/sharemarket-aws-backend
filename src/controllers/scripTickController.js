@@ -387,12 +387,8 @@ const triggerCleanup = async (req, res) => {
  */
 const getTotalDbCount = async (req, res) => {
     try {
-        const [rows] = await db.execute("SELECT TABLE_ROWS FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'scrip_ticks_history'");
-        let count = rows[0]?.TABLE_ROWS ? parseInt(rows[0].TABLE_ROWS, 10) : 0;
-        if (!count || count === 0) {
-            const [cRows] = await db.execute("SELECT COUNT(*) as cnt FROM scrip_ticks_history");
-            count = parseInt(cRows[0]?.cnt || 0, 10);
-        }
+        const [cRows] = await db.execute("SELECT COUNT(id) as cnt FROM scrip_ticks_history");
+        const count = parseInt(cRows[0]?.cnt || 0, 10);
         return res.json({ success: true, count });
     } catch (err) {
         console.error('[scripTickController] Error fetching total DB count:', err.message);

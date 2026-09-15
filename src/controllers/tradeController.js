@@ -1851,7 +1851,7 @@ const getActivePositions = async (req, res) => {
             if (info) {
                 pos.lot_size = info.lot_size;
                 pos.usdinr_value = info.usdinr_value;
-                pos.is_commodity = info.category === 'COMMODITY' || info.category === 'FOREX' || info.category === 'CRYPTO';
+                pos.is_commodity = info.category === 'COMMODITY' || info.category === 'FOREX' || info.category === 'CRYPTO' || info.category === 'COMEX';
                 if (pos.is_commodity) {
                     try {
                         const marketDataService = require('../services/MarketDataService');
@@ -1894,7 +1894,8 @@ const getActivePositions = async (req, res) => {
  * Get Trades by Status (Active, Closed, Deleted)
  */
 const getTrades = async (req, res) => {
-    const { status, user_id } = req.query; // OPEN, CLOSED, DELETED, CANCELLED
+    const { status } = req.query; // OPEN, CLOSED, DELETED, CANCELLED
+    const targetUserId = req.query.user_id || req.query.userId || req.query.clientId;
     try {
         // lot_size priority:
         //   1. trades.lot_size_at_entry  → saved at trade creation (most accurate)
@@ -1919,6 +1920,10 @@ const getTrades = async (req, res) => {
                 OR UPPER(t.symbol) = UPPER(st.tradingsymbol)
             LEFT JOIN commodity_forex_crypto_lot_sizes cfl
                 ON UPPER(t.symbol) = UPPER(cfl.symbol)
+                OR UPPER(t.symbol) = CONCAT('COMMODITY:', UPPER(cfl.symbol))
+                OR UPPER(t.symbol) = CONCAT('FOREX:', UPPER(cfl.symbol))
+                OR UPPER(t.symbol) = CONCAT('CRYPTO:', UPPER(cfl.symbol))
+                OR REPLACE(REPLACE(REPLACE(REPLACE(UPPER(t.symbol), 'COMMODITY:', ''), 'FOREX:', ''), 'CRYPTO:', ''), '/', '') = REPLACE(UPPER(cfl.symbol), '/', '')
             LEFT JOIN scrip_data sd ON t.symbol = sd.symbol
             WHERE 1=1`;
         const params = [];
@@ -1953,9 +1958,9 @@ const getTrades = async (req, res) => {
         }
 
         // Filter by specific user_id (for client detail views)
-        if (user_id) {
+        if (targetUserId) {
             query += ' AND t.user_id = ?';
-            params.push(user_id);
+            params.push(targetUserId);
         } else if (req.user.role !== 'TRADER') {
             // Exclude demo trades for overall lists viewed by admin/broker
             query += ' AND u.is_demo = 0';
@@ -2016,6 +2021,8 @@ const getTrades = async (req, res) => {
             params.push(req.query.toDate);
         }
 
+        query += ' ORDER BY t.id DESC';
+
         const [rows] = await db.execute(query, params);
         const commodityLotService = require('../services/CommodityLotService');
         rows.forEach(trade => {
@@ -2023,7 +2030,7 @@ const getTrades = async (req, res) => {
             if (info) {
                 trade.lot_size = info.lot_size;
                 trade.usdinr_value = info.usdinr_value;
-                trade.is_commodity = info.category === 'COMMODITY' || info.category === 'FOREX' || info.category === 'CRYPTO';
+                trade.is_commodity = info.category === 'COMMODITY' || info.category === 'FOREX' || info.category === 'CRYPTO' || info.category === 'COMEX';
                 if (trade.is_commodity && trade.status === 'OPEN') {
                     try {
                         const marketDataService = require('../services/MarketDataService');
@@ -2067,7 +2074,15 @@ const getTrades = async (req, res) => {
                     if ((trade.status === 'OPEN' || trade.status === 'HOLD') && (!trade.pnl || parseFloat(trade.pnl) === 0)) {
                         const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
                         const prefixForPnl = trade.market_type === 'EQUITY' ? 'NSE' : (trade.market_type === 'OPTIONS' ? 'NFO' : trade.market_type);
-                        const possibleSymbols = [trade.symbol, `${prefixForPnl}:${cleanSymbol}`, cleanSymbol];
+                        // For COMEX/COMMODITY market_type, FastForex stores prices under FOREX: prefix (e.g. FOREX:XAG/USD)
+                        // So we also try FOREX: prefix as fallback to correctly find live CMP
+                        const altPrefix = (trade.market_type === 'COMEX' || trade.market_type === 'COMMODITY') ? 'FOREX' : null;
+                        const possibleSymbols = [
+                            trade.symbol,
+                            `${prefixForPnl}:${cleanSymbol}`,
+                            altPrefix ? `${altPrefix}:${cleanSymbol}` : null,
+                            cleanSymbol
+                        ].filter(Boolean);
 
                         let currentPrice = null;
                         for (const sym of possibleSymbols) {
@@ -2127,9 +2142,9 @@ const getTrades = async (req, res) => {
                 `;
                 const wsiParams = [];
 
-                if (user_id) {
+                if (targetUserId) {
                     wsiQuery += ' AND wsi.user_id = ?';
-                    wsiParams.push(user_id);
+                    wsiParams.push(targetUserId);
                 } else if (req.user && req.user.role !== 'TRADER') {
                     wsiQuery += ' AND u.is_demo = 0';
                 }

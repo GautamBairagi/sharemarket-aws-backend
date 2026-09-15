@@ -12,12 +12,17 @@ class CommodityLotService {
             this.cache.clear();
             for (const row of rows) {
                 const clean = this.cleanSymbol(row.symbol);
-                this.cache.set(clean, {
+                const norm = clean.replace(/[\s\/\_\-]+/g, '');
+                const itemData = {
                     symbol: row.symbol,
                     category: (row.category || '').toUpperCase(),
                     lot_size: parseFloat(row.lot_size || 1),
                     usdinr_value: parseFloat(row.usdinr_value || 95.1)
-                });
+                };
+                this.cache.set(clean, itemData);
+                if (norm && norm !== clean) {
+                    this.cache.set(norm, itemData);
+                }
             }
             this.isLoaded = true;
             console.log(`💼 Commodity/Forex Lot Sizes loaded: ${this.cache.size} symbols cached.`);
@@ -46,7 +51,8 @@ class CommodityLotService {
     getLotInfo(symbol) {
         if (!symbol) return null;
         const clean = this.cleanSymbol(symbol);
-        return this.cache.get(clean) || null;
+        const norm = clean.replace(/[\s\/\_\-]+/g, '');
+        return this.cache.get(clean) || this.cache.get(norm) || null;
     }
 
     /**
