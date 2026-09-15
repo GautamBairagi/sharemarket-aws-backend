@@ -21,29 +21,35 @@ const formatISTTimestamp = (val) => {
 async function runWorker() {
     console.log('[s3ExportWorker] 🚀 AWS S3 ZIP Export Worker started in separate Node OS process...');
 
-    // Dynamic import & unwrap for ESM/CommonJS package 'archiver'
-    let archiverFn = null;
+    // Dynamic import for ESM/CommonJS package 'archiver'
+    let archiverModule = null;
     try {
-        let mod = await import('archiver');
-        while (mod && typeof mod !== 'function' && mod.default) {
-            mod = mod.default;
-        }
-        if (typeof mod === 'function') {
-            archiverFn = mod;
-        } else if (typeof mod?.create === 'function') {
-            archiverFn = mod.create;
-        }
-    } catch (importErr) {
+        archiverModule = await import('archiver');
+    } catch (_) {
         try {
-            let req = require('archiver');
-            while (req && typeof req !== 'function' && req.default) {
-                req = req.default;
-            }
-            if (typeof req === 'function') archiverFn = req;
-        } catch (_) {
-            console.warn('[s3ExportWorker] ⚠️ Could not load archiver module:', importErr.message);
+            archiverModule = require('archiver');
+        } catch (err) {
+            console.warn('[s3ExportWorker] ⚠️ Could not load archiver module:', err.message);
         }
     }
+
+    const createZipArchive = (mod, options = { zlib: { level: 9 } }) => {
+        if (!mod) return null;
+        if (mod.ZipArchive) {
+            return new mod.ZipArchive(options);
+        }
+        let fn = mod.default || mod;
+        while (fn && typeof fn !== 'function' && fn.default) {
+            fn = fn.default;
+        }
+        if (typeof fn === 'function') {
+            return fn('zip', options);
+        }
+        if (typeof fn?.create === 'function') {
+            return fn.create('zip', options);
+        }
+        return null;
+    };
 
     let args = {};
     try {
@@ -168,21 +174,30 @@ async function runWorker() {
 
         // 5. Compress CSV Parts into .ZIP Archive using archiver
         let zipMb = '0.00';
-        if (archiverFn) {
+        const archive = createZipArchive(archiverModule, { zlib: { level: 9 } });
+        if (archive) {
             try {
                 console.log(`[s3ExportWorker] 📦 Compressing ${createdCsvFiles.length} CSV part(s) into ZIP archive...`);
-                const zipOutputStream = fs.createWriteStream(zipFilePath);
-                const archive = archiverFn('zip', { zlib: { level: 9 } });
 
-                archive.pipe(zipOutputStream);
-                createdCsvFiles.forEach(f => {
-                    archive.file(f.filePath, { name: f.fileName });
-                });
-                await archive.finalize();
+                await new Promise((resolve, reject) => {
+                    const zipOutputStream = fs.createWriteStream(zipFilePath);
 
-                await new Promise((res, rej) => {
-                    zipOutputStream.on('finish', res);
-                    zipOutputStream.on('error', rej);
+                    zipOutputStream.on('close', () => {
+                        console.log(`[s3ExportWorker] 📦 Zip stream closed (${archive.pointer ? archive.pointer() : 0} total bytes)`);
+                        resolve();
+                    });
+                    zipOutputStream.on('error', (err) => reject(err));
+                    archive.on('error', (err) => reject(err));
+
+                    archive.pipe(zipOutputStream);
+
+                    createdCsvFiles.forEach(f => {
+                        if (fs.existsSync(f.filePath)) {
+                            archive.file(f.filePath, { name: f.fileName });
+                        }
+                    });
+
+                    archive.finalize();
                 });
 
                 if (fs.existsSync(zipFilePath)) {
