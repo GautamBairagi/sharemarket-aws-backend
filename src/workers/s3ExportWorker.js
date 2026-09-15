@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const { ZipArchive } = require('archiver');
+const archiver = require('archiver');
 const nodemailer = require('nodemailer');
 const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
@@ -146,7 +146,7 @@ async function runWorker() {
         // 5. Compress CSV Parts into .ZIP Archive using archiver
         console.log(`[s3ExportWorker] 📦 Compressing ${createdCsvFiles.length} CSV part(s) into ZIP archive...`);
         const zipOutputStream = fs.createWriteStream(zipFilePath);
-        const archive = new ZipArchive({ zlib: { level: 9 } });
+        const archive = archiver('zip', { zlib: { level: 9 } });
 
         archive.pipe(zipOutputStream);
         createdCsvFiles.forEach(f => {
